@@ -36,6 +36,7 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.io.FileUtils;
+import org.apache.pinot.segment.local.realtime.converter.stats.RealtimeSegmentSegmentCreationDataSource;
 import org.apache.pinot.segment.local.recordtransformer.ComplexTypeTransformer;
 import org.apache.pinot.segment.local.recordtransformer.RecordTransformer;
 import org.apache.pinot.segment.local.segment.creator.RecordReaderSegmentCreationDataSource;
@@ -79,6 +80,7 @@ import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.data.readers.RecordReader;
 import org.apache.pinot.spi.data.readers.RecordReaderFactory;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.recordenricher.RecordEnricherPipeline;
 import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.slf4j.Logger;
@@ -100,6 +102,7 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
   private SegmentCreator _indexCreator;
   private SegmentIndexCreationInfo _segmentIndexCreationInfo;
   private Schema _dataSchema;
+  private RecordEnricherPipeline _recordEnricherPipeline;
   private TransformPipeline _transformPipeline;
   private IngestionSchemaValidator _ingestionSchemaValidator;
   private int _totalDocs = 0;
@@ -157,17 +160,20 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
   public void init(SegmentGeneratorConfig config, RecordReader recordReader)
       throws Exception {
     SegmentCreationDataSource dataSource = new RecordReaderSegmentCreationDataSource(recordReader);
-    init(config, dataSource, new TransformPipeline(config.getTableConfig(), config.getSchema()));
+    init(config, dataSource, RecordEnricherPipeline.fromTableConfig(config.getTableConfig()),
+        new TransformPipeline(config.getTableConfig(), config.getSchema()));
   }
 
   @Deprecated
   public void init(SegmentGeneratorConfig config, SegmentCreationDataSource dataSource,
       RecordTransformer recordTransformer, @Nullable ComplexTypeTransformer complexTypeTransformer)
       throws Exception {
-    init(config, dataSource, new TransformPipeline(recordTransformer, complexTypeTransformer));
+    init(config, dataSource, RecordEnricherPipeline.fromTableConfig(config.getTableConfig()),
+        new TransformPipeline(recordTransformer, complexTypeTransformer));
   }
 
   public void init(SegmentGeneratorConfig config, SegmentCreationDataSource dataSource,
+      RecordEnricherPipeline enricherPipeline,
       TransformPipeline transformPipeline)
       throws Exception {
     _config = config;
@@ -178,10 +184,17 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
     if (config.isFailOnEmptySegment()) {
       Preconditions.checkState(_recordReader.hasNext(), "No record in data source");
     }
+    _recordEnricherPipeline = enricherPipeline;
     _transformPipeline = transformPipeline;
     // Use the same transform pipeline if the data source is backed by a record reader
     if (dataSource instanceof RecordReaderSegmentCreationDataSource) {
+      ((RecordReaderSegmentCreationDataSource) dataSource).setRecordEnricherPipeline(enricherPipeline);
       ((RecordReaderSegmentCreationDataSource) dataSource).setTransformPipeline(transformPipeline);
+    }
+
+    // Optimization for realtime segment conversion
+    if (dataSource instanceof RealtimeSegmentSegmentCreationDataSource) {
+      _config.setRealtimeConversion(true);
     }
 
     // Initialize stats collection
@@ -211,6 +224,23 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
     LOGGER.debug("tempIndexDir:{}", _tempIndexDir);
   }
 
+  /**
+   * Generate a mutable docId to immutable docId mapping from the sortedDocIds iteration order
+   *
+   * @param sortedDocIds used to map sortedDocIds[immutableId] = mutableId (based on RecordReader iteration order)
+   * @return int[] used to map output[mutableId] = immutableId, or null if sortedDocIds is null
+   */
+  private int[] getImmutableToMutableIdMap(@Nullable int[] sortedDocIds) {
+    if (sortedDocIds == null) {
+      return null;
+    }
+    int[] res = new int[sortedDocIds.length];
+    for (int i = 0; i < res.length; i++) {
+      res[sortedDocIds[i]] = i;
+    }
+    return res;
+  }
+
   @Override
   public void build()
       throws Exception {
@@ -222,10 +252,19 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
 
     int incompleteRowsFound = 0;
     try {
+      // TODO: Eventually pull the doc Id sorting logic out of Record Reader so that all row oriented logic can be
+      //    removed from this code.
+      int[] immutableToMutableIdMap = null;
+      if (_recordReader instanceof PinotSegmentRecordReader) {
+        immutableToMutableIdMap =
+            getImmutableToMutableIdMap(((PinotSegmentRecordReader) _recordReader).getSortedDocIds());
+      }
+
       // Initialize the index creation using the per-column statistics information
       // TODO: _indexCreationInfoMap holds the reference to all unique values on heap (ColumnIndexCreationInfo ->
       //       ColumnStatistics) throughout the segment creation. Find a way to release the memory early.
-      _indexCreator.init(_config, _segmentIndexCreationInfo, _indexCreationInfoMap, _dataSchema, _tempIndexDir);
+      _indexCreator.init(_config, _segmentIndexCreationInfo, _indexCreationInfoMap, _dataSchema, _tempIndexDir,
+          immutableToMutableIdMap);
 
       // Build the index
       _recordReader.rewind();
@@ -244,6 +283,7 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
 
           // Should not be needed anymore.
           // Add row to indexes
+          _recordEnricherPipeline.run(decodedRow);
           _transformPipeline.processRow(decodedRow, reusedResult);
 
           recordReadStopTime = System.nanoTime();
@@ -291,19 +331,22 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
     LOGGER.info("Collected stats for {} documents", _totalDocs);
 
     try {
+      // TODO: Eventually pull the doc Id sorting logic out of Record Reader so that all row oriented logic can be
+      //    removed from this code.
+      int[] sortedDocIds = ((PinotSegmentRecordReader) _recordReader).getSortedDocIds();
+      int[] immutableToMutableIdMap = getImmutableToMutableIdMap(sortedDocIds);
+
       // Initialize the index creation using the per-column statistics information
       // TODO: _indexCreationInfoMap holds the reference to all unique values on heap (ColumnIndexCreationInfo ->
       //       ColumnStatistics) throughout the segment creation. Find a way to release the memory early.
-      _indexCreator.init(_config, _segmentIndexCreationInfo, _indexCreationInfoMap, _dataSchema, _tempIndexDir);
+      _indexCreator.init(_config, _segmentIndexCreationInfo, _indexCreationInfoMap, _dataSchema, _tempIndexDir,
+          immutableToMutableIdMap);
 
       // Build the indexes
       LOGGER.info("Start building Index by column");
 
       TreeSet<String> columns = _dataSchema.getPhysicalColumnNames();
 
-      // TODO: Eventually pull the doc Id sorting logic out of Record Reader so that all row oriented logic can be
-      //    removed from this code.
-      int[] sortedDocIds = ((PinotSegmentRecordReader) _recordReader).getSortedDocIds();
       for (String col : columns) {
         _indexCreator.indexColumn(col, sortedDocIds, indexSegment);
       }

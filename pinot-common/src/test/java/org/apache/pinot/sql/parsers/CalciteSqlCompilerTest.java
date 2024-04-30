@@ -18,13 +18,11 @@
  */
 package org.apache.pinot.sql.parsers;
 
-import java.io.StringReader;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlNumericLiteral;
 import org.apache.pinot.common.request.DataSource;
 import org.apache.pinot.common.request.Expression;
@@ -39,7 +37,6 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 import org.apache.pinot.sql.FilterKind;
 import org.apache.pinot.sql.parsers.parser.ParseException;
 import org.apache.pinot.sql.parsers.parser.SqlInsertFromFile;
-import org.apache.pinot.sql.parsers.parser.SqlParserImpl;
 import org.apache.pinot.sql.parsers.rewriter.CompileTimeFunctionsInvoker;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -141,25 +138,57 @@ public class CalciteSqlCompilerTest {
     Assert.assertEquals(caseFunc.getOperands().get(6).getLiteral().getFieldValue(), 0L);
   }
 
-  @Test(expectedExceptions = SqlCompilationException.class)
-  public void testInvalidCaseWhenStatements() {
-    // Not support Aggregation functions in case statements.
-    try {
-      //@formatter:off
-      CalciteSqlParser.compileToPinotQuery(
-          "SELECT OrderID, Quantity,\n"
-              + "CASE\n"
-              + "    WHEN sum(Quantity) > 30 THEN 'The quantity is greater than 30'\n"
-              + "    WHEN sum(Quantity) = 30 THEN 'The quantity is 30'\n"
-              + "    ELSE 'The quantity is under 30'\n"
-              + "END AS QuantityText\n"
-              + "FROM OrderDetails");
-      //@formatter:on
-    } catch (SqlCompilationException e) {
-      Assert.assertEquals(e.getMessage(),
-          "Aggregation functions inside WHEN Clause is not supported - SUM(`Quantity`) > 30");
-      throw e;
-    }
+  @Test
+  public void testAggregationInCaseWhenStatementsWithGroupBy() {
+    //@formatter:off
+    PinotQuery pinotQuery = CalciteSqlParser.compileToPinotQuery(
+        "SELECT OrderID, SUM(Quantity),\n"
+            + "CASE\n"
+            + "    WHEN sum(Quantity) > 30 THEN 'The quantity is greater than 30'\n"
+            + "    WHEN sum(Quantity) = 30 THEN 'The quantity is 30'\n"
+            + "    ELSE 'The quantity is under 30'\n"
+            + "END AS QuantityText\n"
+            + "FROM OrderDetails\n"
+            + "GROUP BY OrderID");
+    //@formatter:on
+    Function caseStm = pinotQuery.getSelectList().get(2).getFunctionCall().getOperands().get(0).getFunctionCall();
+    Assert.assertEquals(caseStm.getOperator(), "case");
+    Expression firstWhen = caseStm.getOperands().get(0);
+    Assert.assertEquals(firstWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperator(), "sum");
+    Assert.assertEquals(
+        firstWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperands().get(0).getIdentifier()
+            .getName(), "Quantity");
+    Expression secondWhen = caseStm.getOperands().get(2);
+    Assert.assertEquals(secondWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperator(), "sum");
+    Assert.assertEquals(
+        secondWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperands().get(0).getIdentifier()
+            .getName(), "Quantity");
+  }
+
+  @Test
+  public void testAggregationInCaseWhenStatements() {
+    //@formatter:off
+    PinotQuery pinotQuery = CalciteSqlParser.compileToPinotQuery(
+        "SELECT sum(Quantity),\n"
+            + "CASE\n"
+            + "    WHEN sum(Quantity) > 30 THEN 'The quantity is greater than 30'\n"
+            + "    WHEN sum(Quantity) = 30 THEN 'The quantity is 30'\n"
+            + "    ELSE 'The quantity is under 30'\n"
+            + "END AS QuantityText\n"
+            + "FROM OrderDetails\n");
+    //@formatter:on
+    Function caseStm = pinotQuery.getSelectList().get(1).getFunctionCall().getOperands().get(0).getFunctionCall();
+    Assert.assertEquals(caseStm.getOperator(), "case");
+    Expression firstWhen = caseStm.getOperands().get(0);
+    Assert.assertEquals(firstWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperator(), "sum");
+    Assert.assertEquals(
+        firstWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperands().get(0).getIdentifier()
+            .getName(), "Quantity");
+    Expression secondWhen = caseStm.getOperands().get(2);
+    Assert.assertEquals(secondWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperator(), "sum");
+    Assert.assertEquals(
+        secondWhen.getFunctionCall().getOperands().get(0).getFunctionCall().getOperands().get(0).getIdentifier()
+            .getName(), "Quantity");
   }
 
   @Test
@@ -2955,22 +2984,11 @@ public class CalciteSqlCompilerTest {
    * Test for customized components in src/main/codegen/parserImpls.ftl file.
    */
   @Test
-  public void testParserExtensionImpl()
-      throws Exception {
+  public void testParserExtensionImpl() {
     String customSql = "INSERT INTO db.tbl FROM FILE 'file:///tmp/file1', FILE 'file:///tmp/file2'";
-    SqlNodeAndOptions sqlNodeAndOptions = testSqlWithCustomSqlParser(customSql);
+    SqlNodeAndOptions sqlNodeAndOptions = CalciteSqlParser.compileToSqlNodeAndOptions(customSql);;
     Assert.assertTrue(sqlNodeAndOptions.getSqlNode() instanceof SqlInsertFromFile);
     Assert.assertEquals(sqlNodeAndOptions.getSqlType(), PinotSqlType.DML);
-  }
-
-  private static SqlNodeAndOptions testSqlWithCustomSqlParser(String sqlString)
-      throws Exception {
-    try (StringReader inStream = new StringReader(sqlString)) {
-      SqlParserImpl sqlParser = CalciteSqlParser.newSqlParser(inStream);
-      SqlNodeList sqlNodeList = sqlParser.SqlStmtsEof();
-      // Extract OPTION statements from sql.
-      return CalciteSqlParser.extractSqlNodeAndOptions(sqlString, sqlNodeList);
-    }
   }
 
   @Test

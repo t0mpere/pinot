@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.common.utils.fetcher;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.InetAddresses;
 import java.io.File;
 import java.io.IOException;
@@ -43,9 +44,16 @@ import org.apache.pinot.spi.utils.retry.RetryPolicies;
 public class HttpSegmentFetcher extends BaseSegmentFetcher {
   protected FileUploadDownloadClient _httpClient;
 
+  @VisibleForTesting
+  void setHttpClient(FileUploadDownloadClient httpClient) {
+    _httpClient = httpClient;
+  }
+
   @Override
   protected void doInit(PinotConfiguration config) {
-    _httpClient = new FileUploadDownloadClient(HttpClientConfig.newBuilder(config).build());
+    if (_httpClient == null) {
+      _httpClient = new FileUploadDownloadClient(HttpClientConfig.newBuilder(config).build());
+    }
   }
 
   @Override
@@ -53,7 +61,7 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
       throws Exception {
     // Create a RoundRobinURIProvider to round robin IP addresses when retry uploading. Otherwise may always try to
     // download from a same broken host as: 1) DNS may not RR the IP addresses 2) OS cache the DNS resolution result.
-    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(downloadURI);
+    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(List.of(downloadURI), true);
 
     int retryCount = getRetryCount(uriProvider);
 
@@ -72,9 +80,8 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
           httpHeaders.add(new BasicHeader(HttpHeaders.HOST, hostName + ":" + port));
         }
         int statusCode = _httpClient.downloadFile(uri, dest, _authProvider, httpHeaders);
-        _logger
-            .info("Downloaded segment from: {} to: {} of size: {}; Response status code: {}", uri, dest, dest.length(),
-                statusCode);
+        _logger.info("Downloaded segment from: {} to: {} of size: {}; Response status code: {}", uri, dest,
+            dest.length(), statusCode);
         return true;
       } catch (HttpErrorStatusException e) {
         int statusCode = e.getStatusCode();
@@ -109,7 +116,7 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
       throws Exception {
     // Create a RoundRobinURIProvider to round robin IP addresses when retry uploading. Otherwise, may always try to
     // download from a same broken host as: 1) DNS may not RR the IP addresses 2) OS cache the DNS resolution result.
-    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(downloadURI);
+    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(List.of(downloadURI), true);
 
     int retryCount = getRetryCount(uriProvider);
 
@@ -174,8 +181,12 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
       throws Exception {
     try {
       int statusCode = _httpClient.downloadFile(uri, dest, _authProvider);
-      _logger.info("Downloaded segment from: {} to: {} of size: {}; Response status code: {}", uri, dest, dest.length(),
-          statusCode);
+      _logger.info("Try to download the segment from: {} to: {} of size: {}; Response status code: {}", uri, dest,
+          dest.length(), statusCode);
+      // In case of download failure, throw exception.
+      if (statusCode >= 300) {
+        throw new HttpErrorStatusException("Failed to download segment", statusCode);
+      }
     } catch (Exception e) {
       _logger.warn("Caught exception while downloading segment from: {} to: {}", uri, dest, e);
       throw e;

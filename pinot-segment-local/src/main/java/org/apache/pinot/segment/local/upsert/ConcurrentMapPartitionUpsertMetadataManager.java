@@ -19,14 +19,15 @@
 package org.apache.pinot.segment.local.upsert;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.pinot.common.metrics.ServerGauge;
 import org.apache.pinot.common.metrics.ServerMeter;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentImpl;
@@ -50,6 +51,7 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
 
   // Used to initialize a reference to previous row for merging in partial upsert
   private final LazyRow _reusePreviousRow = new LazyRow();
+  private final Map<String, Object> _reuseMergeResultHolder = new HashMap<>();
 
   @VisibleForTesting
   final ConcurrentHashMap<Object, RecordLocation> _primaryKeyToRecordLocationMap = new ConcurrentHashMap<>();
@@ -70,6 +72,9 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
     String segmentName = segment.getSegmentName();
     segment.enableUpsert(this, validDocIds, queryableDocIds);
 
+    if (_partialUpsertHandler != null) {
+      recordInfoIterator = resolveComparisonTies(recordInfoIterator, _hashFunction);
+    }
     AtomicInteger numKeysInWrongSegment = new AtomicInteger();
     while (recordInfoIterator.hasNext()) {
       RecordInfo recordInfo = recordInfoIterator.next();
@@ -134,8 +139,7 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
                   && LLCSegmentName.isLLCSegment(currentSegmentName)
                   && LLCSegmentName.getSequenceNumber(segmentName) > LLCSegmentName.getSequenceNumber(
                   currentSegmentName))) {
-                removeDocId(currentSegment, currentDocId);
-                addDocId(validDocIds, queryableDocIds, newDocId, recordInfo);
+                replaceDocId(validDocIds, queryableDocIds, currentSegment, currentDocId, newDocId, recordInfo);
                 return new RecordLocation(segment, newDocId, newComparisonValue);
               } else {
                 return currentRecordLocation;
@@ -168,34 +172,6 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
     }
   }
 
-  private static void replaceDocId(ThreadSafeMutableRoaringBitmap validDocIds,
-      @Nullable ThreadSafeMutableRoaringBitmap queryableDocIds, int oldDocId, int newDocId, RecordInfo recordInfo) {
-    validDocIds.replace(oldDocId, newDocId);
-    if (queryableDocIds != null) {
-      if (recordInfo.isDeleteRecord()) {
-        queryableDocIds.remove(oldDocId);
-      } else {
-        queryableDocIds.replace(oldDocId, newDocId);
-      }
-    }
-  }
-
-  private static void addDocId(ThreadSafeMutableRoaringBitmap validDocIds,
-      @Nullable ThreadSafeMutableRoaringBitmap queryableDocIds, int docId, RecordInfo recordInfo) {
-    validDocIds.add(docId);
-    if (queryableDocIds != null && !recordInfo.isDeleteRecord()) {
-      queryableDocIds.add(docId);
-    }
-  }
-
-  private static void removeDocId(IndexSegment segment, int docId) {
-    Objects.requireNonNull(segment.getValidDocIds()).remove(docId);
-    ThreadSafeMutableRoaringBitmap currentQueryableDocIds = segment.getQueryableDocIds();
-    if (currentQueryableDocIds != null) {
-      currentQueryableDocIds.remove(docId);
-    }
-  }
-
   @Override
   protected void removeSegment(IndexSegment segment, MutableRoaringBitmap validDocIds) {
     assert !validDocIds.isEmpty();
@@ -223,22 +199,22 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
 
   @Override
   public void doRemoveExpiredPrimaryKeys() {
-    AtomicInteger numDeletedTTLKeysRemoved = new AtomicInteger();
     AtomicInteger numMetadataTTLKeysRemoved = new AtomicInteger();
+    AtomicInteger numDeletedTTLKeysRemoved = new AtomicInteger();
+    double largestSeenComparisonValue = _largestSeenComparisonValue.get();
     double metadataTTLKeysThreshold;
     if (_metadataTTL > 0) {
-      metadataTTLKeysThreshold = _largestSeenComparisonValue - _metadataTTL;
+      metadataTTLKeysThreshold = largestSeenComparisonValue - _metadataTTL;
     } else {
       metadataTTLKeysThreshold = Double.MIN_VALUE;
     }
-
     double deletedKeysThreshold;
-
     if (_deletedKeysTTL > 0) {
-      deletedKeysThreshold = _largestSeenComparisonValue - _deletedKeysTTL;
+      deletedKeysThreshold = largestSeenComparisonValue - _deletedKeysTTL;
     } else {
       deletedKeysThreshold = Double.MIN_VALUE;
     }
+
     _primaryKeyToRecordLocationMap.forEach((primaryKey, recordLocation) -> {
       double comparisonValue = ((Number) recordLocation.getComparisonValue()).doubleValue();
       if (_metadataTTL > 0 && comparisonValue < metadataTTLKeysThreshold) {
@@ -255,29 +231,25 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
       }
     });
     if (_metadataTTL > 0) {
-      persistWatermark(_largestSeenComparisonValue);
+      persistWatermark(largestSeenComparisonValue);
     }
 
-    int numDeletedTTLKeys = numDeletedTTLKeysRemoved.get();
-    if (numDeletedTTLKeys > 0) {
-      _logger.info("Deleted {} primary keys based on deletedKeysTTL in the table {}", numDeletedTTLKeys,
-          _tableNameWithType);
-      _serverMetrics.addMeteredTableValue(_tableNameWithType, ServerMeter.DELETED_KEYS_TTL_PRIMARY_KEYS_REMOVED,
-          numDeletedTTLKeys);
-    }
+    // Update metrics
+    updatePrimaryKeyGauge();
     int numMetadataTTLKeys = numMetadataTTLKeysRemoved.get();
     if (numMetadataTTLKeys > 0) {
-      _logger.info("Deleted {} primary keys based on metadataTTL in the table {}", numMetadataTTLKeys,
-          _tableNameWithType);
+      _logger.info("Deleted {} primary keys based on metadataTTL", numMetadataTTLKeys);
       _serverMetrics.addMeteredTableValue(_tableNameWithType, ServerMeter.METADATA_TTL_PRIMARY_KEYS_REMOVED,
           numMetadataTTLKeys);
     }
+    int numDeletedTTLKeys = numDeletedTTLKeysRemoved.get();
+    if (numDeletedTTLKeys > 0) {
+      _logger.info("Deleted {} primary keys based on deletedKeysTTL", numDeletedTTLKeys);
+      _serverMetrics.addMeteredTableValue(_tableNameWithType, ServerMeter.DELETED_KEYS_TTL_PRIMARY_KEYS_REMOVED,
+          numDeletedTTLKeys);
+    }
   }
 
-  /**
-   Returns {@code true} when the record is added to the upsert metadata manager,
-   {@code false} when the record is out-of-order thus not added.
-   */
   @Override
   protected boolean doAddRecord(MutableSegment segment, RecordInfo recordInfo) {
     AtomicBoolean isOutOfOrderRecord = new AtomicBoolean(false);
@@ -289,7 +261,7 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
     // When TTL is enabled, update largestSeenComparisonValue when adding new record
     if (_metadataTTL > 0 || _deletedKeysTTL > 0) {
       double comparisonValue = ((Number) newComparisonValue).doubleValue();
-      _largestSeenComparisonValue = Math.max(_largestSeenComparisonValue, comparisonValue);
+      _largestSeenComparisonValue.getAndUpdate(v -> Math.max(v, comparisonValue));
     }
 
     _primaryKeyToRecordLocationMap.compute(HashUtils.hashPrimaryKey(recordInfo.getPrimaryKey(), _hashFunction),
@@ -305,13 +277,12 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
               if (segment == currentSegment) {
                 replaceDocId(validDocIds, queryableDocIds, currentDocId, newDocId, recordInfo);
               } else {
-                removeDocId(currentSegment, currentDocId);
-                addDocId(validDocIds, queryableDocIds, newDocId, recordInfo);
+                replaceDocId(validDocIds, queryableDocIds, currentSegment, currentDocId, newDocId, recordInfo);
               }
               return new RecordLocation(segment, newDocId, newComparisonValue);
             } else {
+              // Out-of-order record
               handleOutOfOrderEvent(currentRecordLocation.getComparisonValue(), recordInfo.getComparisonValue());
-              // this is a out-of-order record then set value to true - this indicates whether out-of-order or not
               isOutOfOrderRecord.set(true);
               return currentRecordLocation;
             }
@@ -322,9 +293,7 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
           }
         });
 
-    // Update metrics
-    _serverMetrics.setValueOfPartitionGauge(_tableNameWithType, _partitionId, ServerGauge.UPSERT_PRIMARY_KEYS_COUNT,
-        _primaryKeyToRecordLocationMap.size());
+    updatePrimaryKeyGauge();
     return !isOutOfOrderRecord.get();
   }
 
@@ -344,7 +313,8 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
             int currentDocId = recordLocation.getDocId();
             if (currentQueryableDocIds == null || currentQueryableDocIds.contains(currentDocId)) {
               _reusePreviousRow.init(currentSegment, currentDocId);
-              _partialUpsertHandler.merge(_reusePreviousRow, record);
+              _partialUpsertHandler.merge(_reusePreviousRow, record, _reuseMergeResultHolder);
+              _reuseMergeResultHolder.clear();
             }
           }
           return recordLocation;

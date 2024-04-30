@@ -42,11 +42,13 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.common.exception.TableNotFoundException;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.controller.api.access.AccessType;
 import org.apache.pinot.controller.api.access.Authenticate;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
@@ -58,13 +60,18 @@ import org.apache.pinot.spi.utils.CommonConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
+import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
-@Api(tags = Constants.BROKER_TAG, authorizations = {@Authorization(value = CommonConstants.SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(
-    apiKeyAuthDefinitions = @ApiKeyAuthDefinition(
-        name = HttpHeaders.AUTHORIZATION,
-        in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
-        key = CommonConstants.SWAGGER_AUTHORIZATION_KEY)))
+
+@Api(tags = Constants.BROKER_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotBrokerRestletResource {
   public static final Logger LOGGER = LoggerFactory.getLogger(PinotBrokerRestletResource.class);
@@ -79,10 +86,10 @@ public class PinotBrokerRestletResource {
   @ApiOperation(value = "List tenants and tables to brokers mappings",
       notes = "List tenants and tables to brokers mappings")
   public Map<String, Map<String, List<String>>> listBrokersMapping(
-      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state) {
+      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state, @Context HttpHeaders headers) {
     Map<String, Map<String, List<String>>> resultMap = new HashMap<>();
     resultMap.put("tenants", getTenantsToBrokersMapping(state));
-    resultMap.put("tables", getTablesToBrokersMapping(state));
+    resultMap.put("tables", getTablesToBrokersMapping(state, headers));
     return resultMap;
   }
 
@@ -119,11 +126,9 @@ public class PinotBrokerRestletResource {
   @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_BROKER)
   @ApiOperation(value = "List tables to brokers mappings", notes = "List tables to brokers mappings")
   public Map<String, List<String>> getTablesToBrokersMapping(
-      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state) {
-    Map<String, List<String>> resultMap = new HashMap<>();
-    _pinotHelixResourceManager.getAllRawTables().stream()
-        .forEach(table -> resultMap.put(table, getBrokersForTable(table, null, state)));
-    return resultMap;
+      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state, @Context HttpHeaders headers) {
+    return _pinotHelixResourceManager.getAllRawTables(headers.getHeaderString(DATABASE)).stream()
+        .collect(Collectors.toMap(table -> table, table -> getBrokersForTable(table, null, state, headers)));
   }
 
   @GET
@@ -134,8 +139,8 @@ public class PinotBrokerRestletResource {
   public List<String> getBrokersForTable(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
       @ApiParam(value = "OFFLINE|REALTIME") @QueryParam("type") String tableTypeStr,
-      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state) {
-    List<InstanceInfo> instanceInfoList = getBrokersForTableV2(tableName, tableTypeStr, state);
+      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state, @Context HttpHeaders headers) {
+    List<InstanceInfo> instanceInfoList = getBrokersForTableV2(tableName, tableTypeStr, state, headers);
     return instanceInfoList.stream().map(InstanceInfo::getInstanceName).collect(Collectors.toList());
   }
 
@@ -146,10 +151,10 @@ public class PinotBrokerRestletResource {
   @ApiOperation(value = "List tenants and tables to brokers mappings",
       notes = "List tenants and tables to brokers mappings")
   public Map<String, Map<String, List<InstanceInfo>>> listBrokersMappingV2(
-      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state) {
+      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state, @Context HttpHeaders headers) {
     Map<String, Map<String, List<InstanceInfo>>> resultMap = new HashMap<>();
     resultMap.put("tenants", getTenantsToBrokersMappingV2(state));
-    resultMap.put("tables", getTablesToBrokersMappingV2(state));
+    resultMap.put("tables", getTablesToBrokersMappingV2(state, headers));
     return resultMap;
   }
 
@@ -193,11 +198,9 @@ public class PinotBrokerRestletResource {
   @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_BROKER)
   @ApiOperation(value = "List tables to brokers mappings", notes = "List tables to brokers mappings")
   public Map<String, List<InstanceInfo>> getTablesToBrokersMappingV2(
-      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state) {
-    Map<String, List<InstanceInfo>> resultMap = new HashMap<>();
-    _pinotHelixResourceManager.getAllRawTables().stream()
-        .forEach(table -> resultMap.put(table, getBrokersForTableV2(table, null, state)));
-    return resultMap;
+      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state, @Context HttpHeaders headers) {
+    return _pinotHelixResourceManager.getAllRawTables(headers.getHeaderString(DATABASE)).stream()
+        .collect(Collectors.toMap(table -> table, table -> getBrokersForTableV2(table, null, state, headers)));
   }
 
   @GET
@@ -208,7 +211,8 @@ public class PinotBrokerRestletResource {
   public List<InstanceInfo> getBrokersForTableV2(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
       @ApiParam(value = "OFFLINE|REALTIME") @QueryParam("type") String tableTypeStr,
-      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state) {
+      @ApiParam(value = "ONLINE|OFFLINE") @QueryParam("state") String state, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     try {
       List<String> tableNamesWithType = _pinotHelixResourceManager
           .getExistingTableNamesWithType(tableName, Constants.validateTableType(tableTypeStr));

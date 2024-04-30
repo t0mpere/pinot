@@ -29,9 +29,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import javax.annotation.Nullable;
-import org.apache.calcite.jdbc.CalciteSchemaBuilder;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.pinot.calcite.jdbc.CalciteSchemaBuilder;
 import org.apache.pinot.common.config.provider.TableCache;
 import org.apache.pinot.core.routing.RoutingManager;
 import org.apache.pinot.core.routing.TablePartitionInfo;
@@ -43,6 +43,7 @@ import org.apache.pinot.query.type.TypeFactory;
 import org.apache.pinot.query.type.TypeSystem;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 
@@ -188,6 +189,8 @@ public class QueryEnvironmentTestBase {
                 + "RANK() OVER(ORDER BY count(*) DESC) AS rank FROM a GROUP BY a.col1) WHERE rank < 5"
         },
         new Object[]{"SELECT RANK() OVER(PARTITION BY a.col2 ORDER BY a.col1) FROM a"},
+        new Object[]{"SELECT a.col1, LEAD(a.col3) OVER (PARTITION BY a.col2 ORDER BY a.col3) FROM a"},
+        new Object[]{"SELECT a.col1, LAG(a.col3) OVER (PARTITION BY a.col2 ORDER BY a.col3) FROM a"},
         new Object[]{"SELECT DENSE_RANK() OVER(ORDER BY a.col1) FROM a"},
         new Object[]{"SELECT a.col1, SUM(a.col3) OVER (ORDER BY a.col2), MIN(a.col3) OVER (ORDER BY a.col2) FROM a"},
         new Object[]{
@@ -272,7 +275,7 @@ public class QueryEnvironmentTestBase {
     RoutingManager routingManager = factory.buildRoutingManager(partitionInfoMap);
     TableCache tableCache = factory.buildTableCache();
     return new QueryEnvironment(new TypeFactory(new TypeSystem()),
-        CalciteSchemaBuilder.asRootSchema(new PinotCatalog(tableCache)),
+        CalciteSchemaBuilder.asRootSchema(new PinotCatalog(tableCache), CommonConstants.DEFAULT_DATABASE),
         new WorkerManager("localhost", reducerPort, routingManager), tableCache);
   }
 

@@ -40,6 +40,7 @@ public class Actions {
     public static final String DELETE_TENANT = "DeleteTenant";
     public static final String DELETE_USER = "DeleteUser";
     public static final String DELETE_ZNODE = "DeleteZnode";
+    public static final String DELETE_DATABASE = "DeleteDatabase";
     public static final String ESTIMATE_UPSERT_MEMORY = "EstimateUpsertMemory";
     public static final String EXECUTE_TASK = "ExecuteTask";
     public static final String GET_ADMIN_INFO = "GetAdminInfo";
@@ -59,6 +60,7 @@ public class Actions {
     public static final String GET_SEGMENT = "GetSegment";
     public static final String GET_SEGMENT_RELOAD_STATUS = "GetSegmentReloadStatus";
     public static final String GET_SERVER_ROUTING_STATS = "GetServerRoutingStats";
+    public static final String GET_DATABASE = "GetDatabase";
     public static final String GET_TABLE = "GetTable";
     public static final String GET_TABLE_CONFIG = "GetTableConfig";
     public static final String GET_TABLE_LEADER = "GetTableLeader";

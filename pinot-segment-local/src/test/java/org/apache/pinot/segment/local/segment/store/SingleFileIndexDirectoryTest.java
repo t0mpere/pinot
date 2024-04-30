@@ -235,10 +235,10 @@ public class SingleFileIndexDirectoryTest {
   public void testRemoveTextIndices()
       throws IOException, ConfigurationException {
     TextIndexConfig config =
-            new TextIndexConfig(false, null, null, false, false, null, null, true, 500, null);
+            new TextIndexConfig(false, null, null, false, false, null, null, true, 500, null, false);
     try (SingleFileIndexDirectory sfd = new SingleFileIndexDirectory(TEMP_DIR, _segmentMetadata, ReadMode.mmap);
-        LuceneTextIndexCreator fooCreator = new LuceneTextIndexCreator("foo", TEMP_DIR, true, config);
-        LuceneTextIndexCreator barCreator = new LuceneTextIndexCreator("bar", TEMP_DIR, true, config)) {
+        LuceneTextIndexCreator fooCreator = new LuceneTextIndexCreator("foo", TEMP_DIR, true, false, null, config);
+        LuceneTextIndexCreator barCreator = new LuceneTextIndexCreator("bar", TEMP_DIR, true, false, null, config)) {
       PinotDataBuffer buf = sfd.newBuffer("col1", StandardIndexes.forward(), 1024);
       buf.putInt(0, 1);
 
@@ -341,10 +341,10 @@ public class SingleFileIndexDirectoryTest {
   public void testGetColumnIndices()
       throws Exception {
     TextIndexConfig config =
-            new TextIndexConfig(false, null, null, false, false, null, null, true, 500, null);
+            new TextIndexConfig(false, null, null, false, false, null, null, true, 500, null, false);
     try (SingleFileIndexDirectory sfd = new SingleFileIndexDirectory(TEMP_DIR, _segmentMetadata, ReadMode.mmap);
-        LuceneTextIndexCreator fooCreator = new LuceneTextIndexCreator("foo", TEMP_DIR, true, config);
-        LuceneTextIndexCreator barCreator = new LuceneTextIndexCreator("bar", TEMP_DIR, true, config)) {
+        LuceneTextIndexCreator fooCreator = new LuceneTextIndexCreator("foo", TEMP_DIR, true, false, null, config);
+        LuceneTextIndexCreator barCreator = new LuceneTextIndexCreator("bar", TEMP_DIR, true, false, null, config)) {
       PinotDataBuffer buf = sfd.newBuffer("col1", StandardIndexes.forward(), 1024);
       buf.putInt(0, 111);
       buf = sfd.newBuffer("col2", StandardIndexes.dictionary(), 1024);

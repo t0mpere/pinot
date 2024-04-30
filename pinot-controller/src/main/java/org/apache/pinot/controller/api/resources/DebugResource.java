@@ -48,6 +48,7 @@ import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -62,7 +63,9 @@ import org.apache.pinot.common.metrics.ControllerMetrics;
 import org.apache.pinot.common.restlet.resources.SegmentConsumerInfo;
 import org.apache.pinot.common.restlet.resources.SegmentErrorInfo;
 import org.apache.pinot.common.restlet.resources.SegmentServerDebugInfo;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.controller.ControllerConf;
+import org.apache.pinot.controller.LeadControllerManager;
 import org.apache.pinot.controller.api.debug.TableDebugInfo;
 import org.apache.pinot.controller.api.exception.ControllerApplicationException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
@@ -81,6 +84,7 @@ import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.BROKER_RESOURCE_INSTANCE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
@@ -90,9 +94,14 @@ import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_K
  * NOTE: Debug classes are not expected to guarantee backward compatibility, and should
  * not be exposed to the client side.
  */
-@Api(tags = Constants.CLUSTER_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.CLUSTER_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/debug/")
 public class DebugResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(DebugResource.class);
@@ -115,6 +124,9 @@ public class DebugResource {
   @Inject
   ControllerConf _controllerConf;
 
+  @Inject
+  LeadControllerManager _leadControllerManager;
+
   @GET
   @Path("tables/{tableName}")
   @Authorize(targetType = TargetType.TABLE, paramName = "tableName", action = Actions.Table.GET_DEBUG_INFO)
@@ -128,8 +140,10 @@ public class DebugResource {
   public String getTableDebugInfo(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
       @ApiParam(value = "OFFLINE|REALTIME") @QueryParam("type") String tableTypeStr,
-      @ApiParam(value = "Verbosity of debug information") @DefaultValue("0") @QueryParam("verbosity") int verbosity)
+      @ApiParam(value = "Verbosity of debug information") @DefaultValue("0") @QueryParam("verbosity") int verbosity,
+      @Context HttpHeaders headers)
       throws JsonProcessingException {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     ObjectNode root = JsonUtils.newObjectNode();
     root.put("clusterName", _pinotHelixResourceManager.getHelixClusterName());
 
@@ -159,8 +173,10 @@ public class DebugResource {
   public TableDebugInfo.SegmentDebugInfo getSegmentDebugInfo(
       @ApiParam(value = "Name of the table (with type)", required = true) @PathParam("tableName")
           String tableNameWithType,
-      @ApiParam(value = "Name of the segment", required = true) @PathParam("segmentName") String segmentName)
+      @ApiParam(value = "Name of the segment", required = true) @PathParam("segmentName") String segmentName,
+      @Context HttpHeaders headers)
       throws Exception {
+    tableNameWithType = DatabaseUtils.translateTableName(tableNameWithType, headers);
     return debugSegment(tableNameWithType, segmentName);
   }
 
@@ -226,7 +242,8 @@ public class DebugResource {
 
   private TableDebugInfo.TableSizeSummary getTableSize(String tableNameWithType) {
     TableSizeReader tableSizeReader =
-        new TableSizeReader(_executor, _connectionManager, _controllerMetrics, _pinotHelixResourceManager);
+        new TableSizeReader(_executor, _connectionManager, _controllerMetrics, _pinotHelixResourceManager,
+            _leadControllerManager);
     TableSizeReader.TableSizeDetails tableSizeDetails;
     try {
       tableSizeDetails = tableSizeReader

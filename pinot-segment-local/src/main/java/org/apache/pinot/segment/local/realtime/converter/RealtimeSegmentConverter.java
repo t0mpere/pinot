@@ -42,6 +42,7 @@ import org.apache.pinot.spi.config.table.SegmentZKPropsConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.recordenricher.RecordEnricherPipeline;
 
 
 public class RealtimeSegmentConverter {
@@ -117,6 +118,9 @@ public class RealtimeSegmentConverter {
     genConfig.setNullHandlingEnabled(_nullHandlingEnabled);
     genConfig.setSegmentZKPropsConfig(_segmentZKPropsConfig);
 
+    // flush any artifacts to disk to improve mutable to immutable segment conversion
+    _realtimeSegmentImpl.commit();
+
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
     try (PinotSegmentRecordReader recordReader = new PinotSegmentRecordReader()) {
       int[] sortedDocIds = _columnIndicesForRealtimeTable.getSortedColumn() != null
@@ -125,7 +129,8 @@ public class RealtimeSegmentConverter {
       recordReader.init(_realtimeSegmentImpl, sortedDocIds);
       RealtimeSegmentSegmentCreationDataSource dataSource =
           new RealtimeSegmentSegmentCreationDataSource(_realtimeSegmentImpl, recordReader);
-      driver.init(genConfig, dataSource, TransformPipeline.getPassThroughPipeline());
+      driver.init(genConfig, dataSource, RecordEnricherPipeline.getPassThroughPipeline(),
+          TransformPipeline.getPassThroughPipeline());
 
       if (!_enableColumnMajor) {
         driver.build();

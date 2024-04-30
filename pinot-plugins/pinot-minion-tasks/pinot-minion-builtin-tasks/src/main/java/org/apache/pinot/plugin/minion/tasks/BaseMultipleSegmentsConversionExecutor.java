@@ -51,8 +51,10 @@ import org.apache.pinot.minion.event.MinionEventObserver;
 import org.apache.pinot.minion.event.MinionEventObservers;
 import org.apache.pinot.minion.exception.TaskCancelledException;
 import org.apache.pinot.segment.local.utils.SegmentPushUtils;
+import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.filesystem.LocalPinotFS;
 import org.apache.pinot.spi.filesystem.PinotFS;
 import org.apache.pinot.spi.ingestion.batch.BatchConfigProperties;
 import org.apache.pinot.spi.ingestion.batch.spec.PinotClusterSpec;
@@ -77,6 +79,7 @@ import org.slf4j.LoggerFactory;
 public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExecutor {
   private static final Logger LOGGER = LoggerFactory.getLogger(BaseMultipleSegmentsConversionExecutor.class);
   private static final String CUSTOM_SEGMENT_UPLOAD_CONTEXT_LINEAGE_ENTRY_ID = "lineageEntryId";
+  private static final PinotFS LOCAL_PINOT_FS = new LocalPinotFS();
 
   private static final int DEFUALT_PUSH_ATTEMPTS = 5;
   private static final int DEFAULT_PUSH_PARALLELISM = 1;
@@ -192,6 +195,8 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
     String crypterName = getTableConfig(tableNameWithType).getValidationConfig().getCrypterClassName();
     try {
       List<File> inputSegmentDirs = new ArrayList<>();
+      int numRecords = 0;
+
       for (int i = 0; i < downloadURLs.length; i++) {
         // Download the segment file
         _eventObserver.notifyProgress(_pinotTaskConfig, String
@@ -209,12 +214,18 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
         if (!FileUtils.deleteQuietly(tarredSegmentFile)) {
           LOGGER.warn("Failed to delete tarred input segment: {}", tarredSegmentFile.getAbsolutePath());
         }
+
+        reportSegmentDownloadMetrics(indexDir, tableNameWithType, taskType);
+        SegmentMetadataImpl segmentMetadata = new SegmentMetadataImpl(indexDir);
+        numRecords += segmentMetadata.getTotalDocs();
       }
 
       // Convert the segments
       File workingDir = new File(tempDataDir, "workingDir");
       Preconditions.checkState(workingDir.mkdir());
       List<SegmentConversionResult> segmentConversionResults = convert(pinotTaskConfig, inputSegmentDirs, workingDir);
+
+      reportTaskProcessingMetrics(tableNameWithType, taskType, numRecords);
 
       // Create a directory for converted tarred segment files
       File convertedTarredSegmentDir = new File(tempDataDir, "convertedTarredSegmentDir");
@@ -224,11 +235,13 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
       List<File> tarredSegmentFiles = new ArrayList<>(numOutputSegments);
       int count = 1;
       for (SegmentConversionResult segmentConversionResult : segmentConversionResults) {
+        File convertedSegmentDir = segmentConversionResult.getFile();
+        reportSegmentUploadMetrics(convertedSegmentDir, tableNameWithType, taskType);
+
         // Tar the converted segment
         _eventObserver.notifyProgress(_pinotTaskConfig, String
             .format("Compressing segment: %s (%d out of %d)", segmentConversionResult.getSegmentName(), count++,
                 numOutputSegments));
-        File convertedSegmentDir = segmentConversionResult.getFile();
         File convertedSegmentTarFile = new File(convertedTarredSegmentDir,
             segmentConversionResult.getSegmentName() + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
         TarGzCompressionUtils.createTarGzFile(convertedSegmentDir, convertedSegmentTarFile);
@@ -274,14 +287,11 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
 
         String pushMode =
             configs.getOrDefault(BatchConfigProperties.PUSH_MODE, BatchConfigProperties.SegmentPushType.TAR.name());
-        URI outputSegmentTarURI;
         if (BatchConfigProperties.SegmentPushType.valueOf(pushMode.toUpperCase())
             != BatchConfigProperties.SegmentPushType.TAR) {
-          outputSegmentTarURI = moveSegmentToOutputPinotFS(configs, convertedTarredSegmentFile);
+          URI outputSegmentTarURI = moveSegmentToOutputPinotFS(configs, convertedTarredSegmentFile);
           LOGGER.info("Moved generated segment from [{}] to location: [{}]", convertedTarredSegmentFile,
               outputSegmentTarURI);
-        } else {
-          outputSegmentTarURI = convertedTarredSegmentFile.toURI();
         }
 
         List<Header> httpHeaders = new ArrayList<>();
@@ -305,7 +315,7 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
         List<NameValuePair> parameters = Arrays.asList(enableParallelPushProtectionParameter, tableNameParameter,
             tableTypeParameter);
 
-        pushSegment(tableNameParameter.getValue(), configs, outputSegmentTarURI, httpHeaders, parameters,
+        pushSegment(tableNameParameter.getValue(), configs, convertedTarredSegmentFile.toURI(), httpHeaders, parameters,
             segmentConversionResult);
         if (!FileUtils.deleteQuietly(convertedTarredSegmentFile)) {
           LOGGER.warn("Failed to delete tarred converted segment: {}", convertedTarredSegmentFile.getAbsolutePath());
@@ -327,12 +337,12 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
     }
   }
 
-  private void pushSegment(String tableName, Map<String, String> taskConfigs, URI outputSegmentTarURI,
+  private void pushSegment(String tableName, Map<String, String> taskConfigs, URI localSegmentTarURI,
       List<Header> headers, List<NameValuePair> parameters, SegmentConversionResult segmentConversionResult)
       throws Exception {
     String pushMode =
         taskConfigs.getOrDefault(BatchConfigProperties.PUSH_MODE, BatchConfigProperties.SegmentPushType.TAR.name());
-    LOGGER.info("Trying to push Pinot segment with push mode {} from {}", pushMode, outputSegmentTarURI);
+    LOGGER.info("Trying to push Pinot segment with push mode {} from {}", pushMode, localSegmentTarURI);
 
     PushJobSpec pushJobSpec = new PushJobSpec();
     pushJobSpec.setPushAttempts(DEFUALT_PUSH_ATTEMPTS);
@@ -345,7 +355,7 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
 
     switch (BatchConfigProperties.SegmentPushType.valueOf(pushMode.toUpperCase())) {
       case TAR:
-          File tarFile = new File(outputSegmentTarURI);
+          File tarFile = new File(localSegmentTarURI);
           String segmentName = segmentConversionResult.getSegmentName();
           String tableNameWithType = segmentConversionResult.getTableNameWithType();
           String uploadURL = taskConfigs.get(MinionConstants.UPLOAD_URL_KEY);
@@ -355,12 +365,11 @@ public abstract class BaseMultipleSegmentsConversionExecutor extends BaseTaskExe
       case METADATA:
         if (taskConfigs.containsKey(BatchConfigProperties.OUTPUT_SEGMENT_DIR_URI)) {
           URI outputSegmentDirURI = URI.create(taskConfigs.get(BatchConfigProperties.OUTPUT_SEGMENT_DIR_URI));
-          try (PinotFS outputFileFS = MinionTaskUtils.getOutputPinotFS(taskConfigs, outputSegmentDirURI)) {
-            Map<String, String> segmentUriToTarPathMap =
-                SegmentPushUtils.getSegmentUriToTarPathMap(outputSegmentDirURI, pushJobSpec,
-                    new String[]{outputSegmentTarURI.toString()});
-            SegmentPushUtils.sendSegmentUriAndMetadata(spec, outputFileFS, segmentUriToTarPathMap, headers, parameters);
-          }
+          Map<String, String> segmentUriToTarPathMap =
+              SegmentPushUtils.getSegmentUriToTarPathMap(outputSegmentDirURI, pushJobSpec,
+                  new String[]{localSegmentTarURI.toString()});
+          // Use local FS to avoid copying segment from deep store.
+          SegmentPushUtils.sendSegmentUriAndMetadata(spec, LOCAL_PINOT_FS, segmentUriToTarPathMap, headers, parameters);
         } else {
           throw new RuntimeException("Output dir URI missing for metadata push");
         }

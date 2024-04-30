@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -58,10 +59,11 @@ import org.apache.pinot.common.utils.PinotAppConfigs;
 import org.apache.pinot.common.utils.ServiceStartableUtils;
 import org.apache.pinot.common.utils.ServiceStatus;
 import org.apache.pinot.common.utils.ServiceStatus.Status;
-import org.apache.pinot.common.utils.TlsUtils;
 import org.apache.pinot.common.utils.config.TagNameUtils;
 import org.apache.pinot.common.utils.fetcher.SegmentFetcherFactory;
 import org.apache.pinot.common.utils.helix.HelixHelper;
+import org.apache.pinot.common.utils.tls.PinotInsecureMode;
+import org.apache.pinot.common.utils.tls.TlsUtils;
 import org.apache.pinot.common.version.PinotVersion;
 import org.apache.pinot.core.common.datatable.DataTableBuilderFactory;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
@@ -152,6 +154,10 @@ public abstract class BaseServerStarter implements ServiceStartable {
     _helixClusterName = _serverConf.getProperty(CommonConstants.Helix.CONFIG_OF_CLUSTER_NAME);
     ServiceStartableUtils.applyClusterConfig(_serverConf, _zkAddress, _helixClusterName, ServiceRole.SERVER);
 
+    PinotInsecureMode.setPinotInInsecureMode(Boolean.parseBoolean(
+        _serverConf.getProperty(CommonConstants.CONFIG_OF_PINOT_INSECURE_MODE,
+            CommonConstants.DEFAULT_PINOT_INSECURE_MODE)));
+
     setupHelixSystemProperties();
     _listenerConfigs = ListenerConfigUtil.buildServerAdminConfigs(_serverConf);
     _hostname = _serverConf.getProperty(Helix.KEY_OF_SERVER_NETTY_HOST,
@@ -205,7 +211,6 @@ public abstract class BaseServerStarter implements ServiceStartable {
     ThreadResourceUsageProvider.setThreadMemoryMeasurementEnabled(
         _serverConf.getProperty(Server.CONFIG_OF_ENABLE_THREAD_ALLOCATED_BYTES_MEASUREMENT,
             Server.DEFAULT_THREAD_ALLOCATED_BYTES_MEASUREMENT));
-
     // Set data table version send to broker.
     int dataTableVersion =
         _serverConf.getProperty(Server.CONFIG_OF_CURRENT_DATA_TABLE_VERSION, DataTableBuilderFactory.DEFAULT_VERSION);
@@ -271,8 +276,7 @@ public abstract class BaseServerStarter implements ServiceStartable {
 
     // collect all resources which have this instance in the ideal state
     List<String> resourcesToMonitor = new ArrayList<>();
-
-    Set<String> consumingSegments = new HashSet<>();
+    Map<String, Set<String>> consumingSegments = new HashMap<>();
     boolean checkRealtime = realtimeConsumptionCatchupWaitMs > 0;
     if (isFreshnessStatusCheckerEnabled && realtimeMinFreshnessMs <= 0) {
       LOGGER.warn("Realtime min freshness {} must be > 0. Setting relatime min freshness to default {}.",
@@ -285,23 +289,22 @@ public abstract class BaseServerStarter implements ServiceStartable {
       if (!TableNameBuilder.isTableResource(resourceName)) {
         continue;
       }
-
       // Only monitor enabled resources
       IdealState idealState = _helixAdmin.getResourceIdealState(_helixClusterName, resourceName);
-      if (idealState.isEnabled()) {
-
-        for (String partitionName : idealState.getPartitionSet()) {
-          if (idealState.getInstanceSet(partitionName).contains(_instanceId)) {
-            resourcesToMonitor.add(resourceName);
-            break;
-          }
+      if (idealState == null || !idealState.isEnabled()) {
+        continue;
+      }
+      for (String partitionName : idealState.getPartitionSet()) {
+        if (idealState.getInstanceSet(partitionName).contains(_instanceId)) {
+          resourcesToMonitor.add(resourceName);
+          break;
         }
-        if (checkRealtime && TableNameBuilder.isRealtimeTableResource(resourceName)) {
-          for (String partitionName : idealState.getPartitionSet()) {
-            if (StateModel.SegmentStateModel.CONSUMING.equals(
-                idealState.getInstanceStateMap(partitionName).get(_instanceId))) {
-              consumingSegments.add(partitionName);
-            }
+      }
+      if (checkRealtime && TableNameBuilder.isRealtimeTableResource(resourceName)) {
+        for (String partitionName : idealState.getPartitionSet()) {
+          if (StateModel.SegmentStateModel.CONSUMING.equals(
+              idealState.getInstanceStateMap(partitionName).get(_instanceId))) {
+            consumingSegments.computeIfAbsent(resourceName, k -> new HashSet<>()).add(partitionName);
           }
         }
       }
@@ -328,7 +331,7 @@ public abstract class BaseServerStarter implements ServiceStartable {
             realtimeMinFreshnessMs, idleTimeoutMs);
         FreshnessBasedConsumptionStatusChecker freshnessStatusChecker =
             new FreshnessBasedConsumptionStatusChecker(_serverInstance.getInstanceDataManager(), consumingSegments,
-                realtimeMinFreshnessMs, idleTimeoutMs);
+                this::getConsumingSegments, realtimeMinFreshnessMs, idleTimeoutMs);
         Supplier<Integer> getNumConsumingSegmentsNotReachedMinFreshness =
             freshnessStatusChecker::getNumConsumingSegmentsNotReachedIngestionCriteria;
         serviceStatusCallbackListBuilder.add(
@@ -337,7 +340,8 @@ public abstract class BaseServerStarter implements ServiceStartable {
       } else if (isOffsetBasedConsumptionStatusCheckerEnabled) {
         LOGGER.info("Setting up offset based status checker");
         OffsetBasedConsumptionStatusChecker consumptionStatusChecker =
-            new OffsetBasedConsumptionStatusChecker(_serverInstance.getInstanceDataManager(), consumingSegments);
+            new OffsetBasedConsumptionStatusChecker(_serverInstance.getInstanceDataManager(), consumingSegments,
+                this::getConsumingSegments);
         Supplier<Integer> getNumConsumingSegmentsNotReachedTheirLatestOffset =
             consumptionStatusChecker::getNumConsumingSegmentsNotReachedIngestionCriteria;
         serviceStatusCallbackListBuilder.add(
@@ -353,6 +357,22 @@ public abstract class BaseServerStarter implements ServiceStartable {
     LOGGER.info("Registering service status handler");
     ServiceStatus.setServiceStatusCallback(_instanceId,
         new ServiceStatus.MultipleCallbackServiceStatusCallback(serviceStatusCallbackListBuilder.build()));
+  }
+
+  @Nullable
+  private Set<String> getConsumingSegments(String realtimeTableName) {
+    IdealState idealState = _helixAdmin.getResourceIdealState(_helixClusterName, realtimeTableName);
+    if (idealState == null || !idealState.isEnabled()) {
+      return null;
+    }
+    Set<String> consumingSegments = new HashSet<>();
+    for (String partitionName : idealState.getPartitionSet()) {
+      if (StateModel.SegmentStateModel.CONSUMING.equals(
+          idealState.getInstanceStateMap(partitionName).get(_instanceId))) {
+        consumingSegments.add(partitionName);
+      }
+    }
+    return consumingSegments;
   }
 
   private void updateInstanceConfigIfNeeded(ServerConf serverConf) {
@@ -418,7 +438,7 @@ public abstract class BaseServerStarter implements ServiceStartable {
       }
     }
 
-    // Update system resource info (CPU, memory, etc)
+    // Update system resource info (CPU, memory, etc.)
     Map<String, String> newSystemResourceInfoMap = new SystemResourceInfo().toMap();
     Map<String, String> existingSystemResourceInfoMap =
         znRecord.getMapField(CommonConstants.Helix.Instance.SYSTEM_RESOURCE_INFO_KEY);
@@ -427,7 +447,7 @@ public abstract class BaseServerStarter implements ServiceStartable {
       if (existingSystemResourceInfoMap == null) {
         existingSystemResourceInfoMap = newSystemResourceInfoMap;
       } else {
-        // existingSystemResourceInfoMap may contains more KV pairs than newSystemResourceInfoMap,
+        // existingSystemResourceInfoMap may contain more KV pairs than newSystemResourceInfoMap,
         // we need to preserve those KV pairs and only update the different values.
         for (Map.Entry<String, String> entry : newSystemResourceInfoMap.entrySet()) {
           existingSystemResourceInfoMap.put(entry.getKey(), entry.getValue());
@@ -514,12 +534,13 @@ public abstract class BaseServerStarter implements ServiceStartable {
       }
     }
 
-    boolean exitServerOnIncompleteStartup = _serverConf.getProperty(
-        Server.CONFIG_OF_EXIT_ON_SERVICE_STATUS_CHECK_FAILURE,
-        Server.DEFAULT_EXIT_ON_SERVICE_STATUS_CHECK_FAILURE);
+    boolean exitServerOnIncompleteStartup =
+        _serverConf.getProperty(Server.CONFIG_OF_EXIT_ON_SERVICE_STATUS_CHECK_FAILURE,
+            Server.DEFAULT_EXIT_ON_SERVICE_STATUS_CHECK_FAILURE);
     if (exitServerOnIncompleteStartup) {
-      String errorMessage = String.format("Service status %s has not turned GOOD within %dms: %s. Exiting server.",
-          serviceStatus, System.currentTimeMillis() - startTimeMs, ServiceStatus.getStatusDescription());
+      String errorMessage =
+          String.format("Service status %s has not turned GOOD within %dms: %s. Exiting server.", serviceStatus,
+              System.currentTimeMillis() - startTimeMs, ServiceStatus.getStatusDescription());
       throw new IllegalStateException(errorMessage);
     }
     LOGGER.warn("Service status has not turned GOOD within {}ms: {}", System.currentTimeMillis() - startTimeMs,
@@ -573,11 +594,12 @@ public abstract class BaseServerStarter implements ServiceStartable {
     ServerConf serverConf = new ServerConf(_serverConf);
     _serverInstance = new ServerInstance(serverConf, _helixManager, accessControlFactory);
     ServerMetrics serverMetrics = _serverInstance.getServerMetrics();
+
     InstanceDataManager instanceDataManager = _serverInstance.getInstanceDataManager();
     instanceDataManager.setSupplierOfIsServerReadyToServeQueries(() -> _isServerReadyToServeQueries);
     // initialize the thread accountant for query killing
-    Tracing.ThreadAccountantOps
-        .initializeThreadAccountant(_serverConf.subset(CommonConstants.PINOT_QUERY_SCHEDULER_PREFIX), _instanceId);
+    Tracing.ThreadAccountantOps.initializeThreadAccountant(
+        _serverConf.subset(CommonConstants.PINOT_QUERY_SCHEDULER_PREFIX), _instanceId);
     initSegmentFetcher(_serverConf);
     StateModelFactory<?> stateModelFactory =
         new SegmentOnlineOfflineStateModelFactory(_instanceId, instanceDataManager);
@@ -630,6 +652,9 @@ public abstract class BaseServerStarter implements ServiceStartable {
     }
 
     preServeQueries();
+
+    // Enable Server level realtime ingestion rate limier
+    RealtimeConsumptionRateManager.getInstance().createServerRateLimiter(_serverConf, serverMetrics);
 
     // Start the query server after finishing the service status check. If the query server is started before all the
     // segments are loaded, broker might not have finished processing the callback of routing table update, and start
@@ -765,7 +790,7 @@ public abstract class BaseServerStarter implements ServiceStartable {
 
   /**
    * When shutting down the server, waits for all the resources turn OFFLINE (all partitions served by the server are
-   * neither ONLINE or CONSUMING).
+   * neither ONLINE nor CONSUMING).
    *
    * @param endTimeMs Timeout for the check
    */

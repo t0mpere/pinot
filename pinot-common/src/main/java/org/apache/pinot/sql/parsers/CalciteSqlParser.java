@@ -95,33 +95,11 @@ public class CalciteSqlParser {
   // Multiple OPTIONs is also supported by:
   // `OPTION (<k1> = <v1>, <k2> = <v2>, <k3> = <v3>)`
   private static final Pattern OPTIONS_REGEX_PATTEN =
-      Pattern.compile("\\s*option\\s*\\(([^\\)]+)\\)\\s*\\Z", Pattern.CASE_INSENSITIVE);
-
-  /**
-   * Checks for the presence of semicolon in the sql query and modifies the query accordingly
-   *
-   * @param sql sql query
-   * @return sql query without semicolons
-   *
-   */
-  private static String removeTerminatingSemicolon(String sql) {
-    // trim all the leading and trailing whitespaces
-    sql = sql.trim();
-    int sqlLength = sql.length();
-
-    // Terminate the semicolon only if the last character of the query is semicolon
-    if (sql.charAt(sqlLength - 1) == ';') {
-      return sql.substring(0, sqlLength - 1);
-    }
-    return sql;
-  }
+      Pattern.compile("\\s*option\\s*\\(([^)]+)\\)\\s*;?\\s*\\Z", Pattern.CASE_INSENSITIVE);
 
   public static SqlNodeAndOptions compileToSqlNodeAndOptions(String sql)
       throws SqlCompilationException {
     long parseStartTimeNs = System.nanoTime();
-
-    // Remove the terminating semicolon from the query
-    sql = removeTerminatingSemicolon(sql);
 
     // extract and remove OPTIONS string
     List<String> options = extractOptionsFromSql(sql);
@@ -131,11 +109,11 @@ public class CalciteSqlParser {
 
     try (StringReader inStream = new StringReader(sql)) {
       SqlParserImpl sqlParser = newSqlParser(inStream);
-      SqlNodeList sqlNodeList = sqlParser.SqlStmtsEof();
+      SqlNodeList sqlNodeList = sqlParser.parseSqlStmtList();
       // Extract OPTION statements from sql.
-      SqlNodeAndOptions sqlNodeAndOptions = extractSqlNodeAndOptions(sql, sqlNodeList);
+      SqlNodeAndOptions sqlNodeAndOptions = extractSqlNodeAndOptions(sqlNodeList);
       // add legacy OPTIONS keyword-based options
-      if (options.size() > 0) {
+      if (!options.isEmpty()) {
         sqlNodeAndOptions.setExtraOptions(extractOptionsMap(options));
       }
       sqlNodeAndOptions.setParseTimeNs(System.nanoTime() - parseStartTimeNs);
@@ -145,8 +123,7 @@ public class CalciteSqlParser {
     }
   }
 
-  @VisibleForTesting
-  static SqlNodeAndOptions extractSqlNodeAndOptions(String sql, SqlNodeList sqlNodeList) {
+  private static SqlNodeAndOptions extractSqlNodeAndOptions(SqlNodeList sqlNodeList) {
     PinotSqlType sqlType = null;
     SqlNode statementNode = null;
     Map<String, String> options = new HashMap<>();
@@ -296,17 +273,25 @@ public class CalciteSqlParser {
             + "the signature is VECTOR_SIMILARITY(float[], float[], int).");
       }
       Expression vectorLiteral = filterExpression.getFunctionCall().getOperands().get(1);
-      // Array Literal is a function of type 'ARRAYVALUECONSTRUCTOR' with operands of Float/Double Literals
-      if (!vectorLiteral.isSetFunctionCall() || !vectorLiteral.getFunctionCall().getOperator().equalsIgnoreCase(
-          "arrayvalueconstructor")) {
-        throw new IllegalStateException("The second argument of VECTOR_SIMILARITY must be a float array literal, "
-            + "the signature is VECTOR_SIMILARITY(float[], float[], int).");
+      /*
+       * Array Literal could be either:
+       * 1. a function of type 'ARRAYVALUECONSTRUCTOR' with operands of float/double
+       * 2. a float/double array literals
+       * Also check in
+       * {@link org.apache.pinot.sql.parsers.rewriter.PredicateComparisonRewriter#updateFunctionExpression(Expression)}
+       */
+      if ((vectorLiteral.isSetFunctionCall() && !vectorLiteral.getFunctionCall().getOperator().equalsIgnoreCase(
+          "arrayvalueconstructor"))
+          || (vectorLiteral.isSetLiteral() && !vectorLiteral.getLiteral().isSetFloatArrayValue()
+          && !vectorLiteral.getLiteral().isSetDoubleArrayValue())) {
+        throw new IllegalStateException("The second argument of VECTOR_SIMILARITY must be a float/double array "
+            + "literal, the signature is VECTOR_SIMILARITY(float[], float[], int)");
       }
       if (filterExpression.getFunctionCall().getOperands().size() == 3) {
         Expression topK = filterExpression.getFunctionCall().getOperands().get(2);
         if (!topK.isSetLiteral()) {
           throw new IllegalStateException("The third argument of VECTOR_SIMILARITY must be an integer literal, "
-              + "the signature is VECTOR_SIMILARITY(float[], float[], int).");
+              + "the signature is VECTOR_SIMILARITY(float[], float[], int)");
         }
       }
     } else {
@@ -739,18 +724,10 @@ public class CalciteSqlParser {
         for (int i = 0; i < whenOperands.size(); i++) {
           SqlNode whenSqlNode = whenOperands.get(i);
           Expression whenExpression = toExpression(whenSqlNode);
-          if (isAggregateExpression(whenExpression)) {
-            throw new SqlCompilationException(
-                "Aggregation functions inside WHEN Clause is not supported - " + whenSqlNode);
-          }
           caseFuncExpr.getFunctionCall().addToOperands(whenExpression);
 
           SqlNode thenSqlNode = thenOperands.get(i);
           Expression thenExpression = toExpression(thenSqlNode);
-          if (isAggregateExpression(thenExpression)) {
-            throw new SqlCompilationException(
-                "Aggregation functions inside THEN Clause is not supported - " + thenSqlNode);
-          }
           caseFuncExpr.getFunctionCall().addToOperands(thenExpression);
         }
         Expression elseExpression = toExpression(elseOperand);
@@ -830,7 +807,7 @@ public class CalciteSqlParser {
         operands.add(toExpression(childNode));
       }
     }
-    validateFunction(canonicalName, operands);
+    ParserUtils.validateFunction(canonicalName, operands);
     Expression functionExpression = RequestUtils.getFunctionExpression(canonicalName);
     functionExpression.getFunctionCall().setOperands(operands);
     if (negated) {
@@ -893,49 +870,6 @@ public class CalciteSqlParser {
       pathBuilder.append('[').append(((SqlLiteral) operand1).toValue()).append(']');
     } else {
       throw new SqlCompilationException("SELECT list item has bad path expression.");
-    }
-  }
-
-  private static void validateFunction(String canonicalName, List<Expression> operands) {
-    switch (canonicalName) {
-      case "jsonextractscalar":
-        validateJsonExtractScalarFunction(operands);
-        break;
-      case "jsonextractkey":
-        validateJsonExtractKeyFunction(operands);
-        break;
-      default:
-        break;
-    }
-  }
-
-  private static void validateJsonExtractScalarFunction(List<Expression> operands) {
-    int numOperands = operands.size();
-
-    // Check that there are exactly 3 or 4 arguments
-    if (numOperands != 3 && numOperands != 4) {
-      throw new SqlCompilationException(
-          "Expect 3 or 4 arguments for transform function: jsonExtractScalar(jsonFieldName, 'jsonPath', "
-              + "'resultsType', ['defaultValue'])");
-    }
-    if (!operands.get(1).isSetLiteral() || !operands.get(2).isSetLiteral() || (numOperands == 4 && !operands.get(3)
-        .isSetLiteral())) {
-      throw new SqlCompilationException(
-          "Expect the 2nd/3rd/4th argument of transform function: jsonExtractScalar(jsonFieldName, 'jsonPath',"
-              + " 'resultsType', ['defaultValue']) to be a single-quoted literal value.");
-    }
-  }
-
-  private static void validateJsonExtractKeyFunction(List<Expression> operands) {
-    // Check that there are exactly 2 arguments
-    if (operands.size() != 2) {
-      throw new SqlCompilationException(
-          "Expect 2 arguments are required for transform function: jsonExtractKey(jsonFieldName, 'jsonPath')");
-    }
-    if (!operands.get(1).isSetLiteral()) {
-      throw new SqlCompilationException(
-          "Expect the 2nd argument for transform function: jsonExtractKey(jsonFieldName, 'jsonPath') to be a "
-              + "single-quoted literal value.");
     }
   }
 

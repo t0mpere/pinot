@@ -47,6 +47,7 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -78,7 +79,8 @@ import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.pinot.spi.utils.CommonConstants.*;
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
+import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
 /**
@@ -102,9 +104,14 @@ import static org.apache.pinot.spi.utils.CommonConstants.*;
  *   }' http://localhost:1234/tenants
  * </ul>
  */
-@Api(tags = Constants.TENANT_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.TENANT_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotTenantRestletResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotTenantRestletResource.class);
@@ -279,11 +286,11 @@ public class PinotTenantRestletResource {
       @ApiParam(value = "Tenant name", required = true) @PathParam("tenantName") String tenantName,
       @ApiParam(value = "Tenant type (server|broker)",
           required = false, allowableValues = "BROKER, SERVER", defaultValue = "SERVER")
-      @QueryParam("type") String tenantType) {
+      @QueryParam("type") String tenantType, @Context HttpHeaders headers) {
     if (tenantType == null || tenantType.isEmpty() || tenantType.equalsIgnoreCase("server")) {
-      return getTablesServedFromServerTenant(tenantName);
+      return getTablesServedFromServerTenant(tenantName, headers.getHeaderString(DATABASE));
     } else if (tenantType.equalsIgnoreCase("broker")) {
-      return getTablesServedFromBrokerTenant(tenantName);
+      return getTablesServedFromBrokerTenant(tenantName, headers.getHeaderString(DATABASE));
     } else {
       throw new ControllerApplicationException(LOGGER, "Invalid tenant type: " + tenantType,
           Response.Status.BAD_REQUEST);
@@ -366,11 +373,11 @@ public class PinotTenantRestletResource {
     }
   }
 
-  private String getTablesServedFromServerTenant(String tenantName) {
+  private String getTablesServedFromServerTenant(String tenantName, @Nullable String database) {
     Set<String> tables = new HashSet<>();
     ObjectNode resourceGetRet = JsonUtils.newObjectNode();
 
-    for (String table : _pinotHelixResourceManager.getAllTables()) {
+    for (String table : _pinotHelixResourceManager.getAllTables(database)) {
       TableConfig tableConfig = _pinotHelixResourceManager.getTableConfig(table);
       if (tableConfig == null) {
         LOGGER.error("Unable to retrieve table config for table: {}", table);
@@ -386,11 +393,11 @@ public class PinotTenantRestletResource {
     return resourceGetRet.toString();
   }
 
-  private String getTablesServedFromBrokerTenant(String tenantName) {
+  private String getTablesServedFromBrokerTenant(String tenantName, @Nullable String database) {
     Set<String> tables = new HashSet<>();
     ObjectNode resourceGetRet = JsonUtils.newObjectNode();
 
-    for (String table : _pinotHelixResourceManager.getAllTables()) {
+    for (String table : _pinotHelixResourceManager.getAllTables(database)) {
       TableConfig tableConfig = _pinotHelixResourceManager.getTableConfig(table);
       if (tableConfig == null) {
         LOGGER.error("Unable to retrieve table config for table: {}", table);
@@ -581,7 +588,7 @@ public class PinotTenantRestletResource {
       }
     }
 
-    boolean enable = StateType.ENABLE.name().equalsIgnoreCase(state) ? true : false;
+    boolean enable = StateType.ENABLE.name().equalsIgnoreCase(state);
     ObjectNode instanceResult = JsonUtils.newObjectNode();
     String instance = null;
     try {
@@ -665,6 +672,7 @@ public class PinotTenantRestletResource {
   public TenantRebalanceResult rebalance(
       @ApiParam(value = "Name of the tenant whose table are to be rebalanced", required = true)
       @PathParam("tenantName") String tenantName, @ApiParam(required = true) TenantRebalanceConfig config) {
+    // TODO decide on if the tenant rebalance should be database aware or not
     config.setTenantName(tenantName);
     return _tenantRebalancer.rebalance(config);
   }

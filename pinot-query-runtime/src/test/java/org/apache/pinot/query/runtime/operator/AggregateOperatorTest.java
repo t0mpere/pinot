@@ -24,9 +24,9 @@ import com.google.common.collect.ImmutableMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.apache.calcite.rel.hint.PinotHintOptions;
 import org.apache.calcite.rel.hint.RelHint;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.pinot.calcite.rel.hint.PinotHintOptions;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
@@ -266,7 +266,7 @@ public class AggregateOperatorTest {
 
     // Then:
     Assert.assertTrue(block.isErrorBlock(), "expected ERROR block from invalid computation");
-    Assert.assertTrue(block.getExceptions().get(1000).contains("String cannot be cast to class"),
+    Assert.assertTrue(block.getExceptions().get(1000).contains("cannot be cast to class"),
         "expected it to fail with class cast exception");
   }
 

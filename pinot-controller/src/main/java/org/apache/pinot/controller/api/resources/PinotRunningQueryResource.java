@@ -67,12 +67,18 @@ import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.QUERY_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.QUERY_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotRunningQueryResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotRunningQueryResource.class);
@@ -166,7 +172,8 @@ public class PinotRunningQueryResource {
       @ApiParam(value = "Timeout for brokers to return running queries") @QueryParam("timeoutMs") @DefaultValue("3000")
           int timeoutMs, @Context HttpHeaders httpHeaders) {
     try {
-      Map<String, List<InstanceInfo>> tableBrokers = _pinotHelixResourceManager.getTableToLiveBrokersMapping();
+      Map<String, List<InstanceInfo>> tableBrokers = _pinotHelixResourceManager.getTableToLiveBrokersMapping(
+          httpHeaders.getHeaderString(DATABASE));
       Map<String, InstanceInfo> brokers = new HashMap<>();
       tableBrokers.values().forEach(list -> list.forEach(info -> brokers.putIfAbsent(getInstanceKey(info), info)));
       return getRunningQueries(brokers, timeoutMs, createRequestHeaders(httpHeaders));
@@ -187,7 +194,7 @@ public class PinotRunningQueryResource {
     }
     LOGGER.debug("Getting running queries via broker urls: {}", brokerUrls);
     CompletionService<MultiHttpRequestResponse> completionService =
-        new MultiHttpRequest(_executor, _httpConnMgr).execute(brokerUrls, requestHeaders, timeoutMs);
+        new MultiHttpRequest(_executor, _httpConnMgr).executeGet(brokerUrls, requestHeaders, timeoutMs);
     Map<String, Map<String, String>> queriesByBroker = new HashMap<>();
     List<String> errMsgs = new ArrayList<>(brokerUrls.size());
     for (int i = 0; i < brokerUrls.size(); i++) {

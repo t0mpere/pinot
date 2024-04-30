@@ -49,15 +49,16 @@ import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
-import org.apache.calcite.jdbc.CalciteSchemaBuilder;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.pinot.calcite.jdbc.CalciteSchemaBuilder;
 import org.apache.pinot.common.Utils;
 import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.config.TagNameUtils;
 import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.controller.ControllerConf;
@@ -72,6 +73,7 @@ import org.apache.pinot.query.catalog.PinotCatalog;
 import org.apache.pinot.query.type.TypeFactory;
 import org.apache.pinot.query.type.TypeSystem;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.exception.DatabaseConflictException;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Broker.Request.QueryOptionKey;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -205,8 +207,14 @@ public class PinotQueryResource {
       throw new WebApplicationException("Permission denied", Response.Status.FORBIDDEN);
     }
 
+    Map<String, String> queryOptionsMap = RequestUtils.parseQuery(query).getOptions();
+    if (queryOptions != null) {
+      queryOptionsMap.putAll(RequestUtils.getOptionsFromString(queryOptions));
+    }
+    String database = DatabaseUtils.extractDatabaseFromQueryRequest(queryOptionsMap, httpHeaders);
     QueryEnvironment queryEnvironment = new QueryEnvironment(new TypeFactory(new TypeSystem()),
-        CalciteSchemaBuilder.asRootSchema(new PinotCatalog(_pinotHelixResourceManager.getTableCache())), null, null);
+        CalciteSchemaBuilder.asRootSchema(new PinotCatalog(database, _pinotHelixResourceManager.getTableCache()),
+            database), null, null);
     List<String> tableNames;
     try {
       tableNames = queryEnvironment.getTableNamesForQuery(query);
@@ -242,19 +250,29 @@ public class PinotQueryResource {
       HttpHeaders httpHeaders) {
     // Get resource table name.
     String tableName;
+    Map<String, String> queryOptionsMap = RequestUtils.parseQuery(query).getOptions();
+    if (queryOptions != null) {
+      queryOptionsMap.putAll(RequestUtils.getOptionsFromString(queryOptions));
+    }
+    String database;
+    try {
+      database = DatabaseUtils.extractDatabaseFromQueryRequest(queryOptionsMap, httpHeaders);
+    } catch (DatabaseConflictException e) {
+      return QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e).toString();
+    }
     try {
       String inputTableName =
           sqlNode != null ? RequestUtils.getTableNames(CalciteSqlParser.compileSqlNodeToPinotQuery(sqlNode)).iterator()
               .next() : CalciteSqlCompiler.compileToBrokerRequest(query).getQuerySource().getTableName();
-      tableName = _pinotHelixResourceManager.getActualTableName(inputTableName);
+      tableName = _pinotHelixResourceManager.getActualTableName(inputTableName, database);
     } catch (Exception e) {
       LOGGER.error("Caught exception while compiling query: {}", query, e);
       try {
         // try to compile the query using multi-stage engine and suggest using it if it succeeds.
         LOGGER.info("Trying to compile query {} using multi-stage engine", query);
         QueryEnvironment queryEnvironment = new QueryEnvironment(new TypeFactory(new TypeSystem()),
-            CalciteSchemaBuilder.asRootSchema(new PinotCatalog(_pinotHelixResourceManager.getTableCache())), null,
-            null);
+            CalciteSchemaBuilder.asRootSchema(new PinotCatalog(database, _pinotHelixResourceManager.getTableCache()),
+                database), null, null);
         queryEnvironment.getTableNamesForQuery(query);
         LOGGER.info("Successfully compiled query using multi-stage engine: {}", query);
         return QueryException.getException(QueryException.SQL_PARSING_ERROR, new Exception(

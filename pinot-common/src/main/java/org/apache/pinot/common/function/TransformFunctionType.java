@@ -117,7 +117,8 @@ public enum TransformFunctionType {
       ReturnTypes.cascade(opBinding -> positionalReturnTypeInferenceFromStringLiteral(opBinding, 2,
           SqlTypeName.VARCHAR), SqlTypeTransforms.FORCE_NULLABLE),
       OperandTypes.family(ImmutableList.of(SqlTypeFamily.ANY, SqlTypeFamily.CHARACTER, SqlTypeFamily.CHARACTER,
-          SqlTypeFamily.CHARACTER), ordinal -> ordinal > 2), "json_extract_index"),
+          SqlTypeFamily.CHARACTER, SqlTypeFamily.CHARACTER), ordinal -> ordinal > 2), "json_extract_index"),
+
   JSON_EXTRACT_KEY("jsonExtractKey", ReturnTypes.TO_ARRAY,
       OperandTypes.family(ImmutableList.of(SqlTypeFamily.ANY, SqlTypeFamily.CHARACTER)), "json_extract_key"),
 
@@ -179,7 +180,7 @@ public enum TransformFunctionType {
   // string functions
   SPLIT("split", ReturnTypes.TO_ARRAY, OperandTypes.family(
       ImmutableList.of(SqlTypeFamily.CHARACTER, SqlTypeFamily.CHARACTER, SqlTypeFamily.INTEGER),
-      ordinal -> ordinal > 1), "split"),
+      ordinal -> ordinal > 1), "split", "string_to_array"),
 
   // array functions
   // The only column accepted by "cardinality" function is multi-value array, thus putting "cardinality" as alias.
@@ -207,6 +208,9 @@ public enum TransformFunctionType {
   CLP_DECODE("clpDecode", ReturnTypes.VARCHAR_2000_NULLABLE, OperandTypes.family(
       ImmutableList.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY, SqlTypeFamily.ANY, SqlTypeFamily.CHARACTER),
       ordinal -> ordinal > 2), "clp_decode"),
+  CLP_ENCODED_VARS_MATCH("clpEncodedVarsMatch", ReturnTypes.BOOLEAN_NOT_NULL, OperandTypes.family(
+      ImmutableList.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY, SqlTypeFamily.CHARACTER),
+      ordinal -> ordinal > 2), "clp_encoded_vars_match"),
 
   // Regexp functions
   REGEXP_EXTRACT("regexpExtract", "regexp_extract"),
@@ -269,6 +273,10 @@ public enum TransformFunctionType {
       OperandTypes.family(ImmutableList.of(SqlTypeFamily.ARRAY)), "vector_dims"),
   VECTOR_NORM("vectorNorm", ReturnTypes.explicit(SqlTypeName.DOUBLE),
       OperandTypes.family(ImmutableList.of(SqlTypeFamily.ARRAY)), "vector_norm"),
+
+  VECTOR_SIMILARITY("vectorSimilarity", ReturnTypes.BOOLEAN_NOT_NULL,
+      OperandTypes.family(ImmutableList.of(SqlTypeFamily.ARRAY, SqlTypeFamily.ANY, SqlTypeFamily.NUMERIC),
+          ordinal -> ordinal > 1 && ordinal < 4), "vector_similarity"),
 
   ARRAY_VALUE_CONSTRUCTOR("arrayValueConstructor", "array_value_constructor"),
 

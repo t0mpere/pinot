@@ -75,6 +75,7 @@ import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.config.QueryOptionsUtils;
 import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.core.auth.Actions;
@@ -92,7 +93,9 @@ import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.eventlistener.query.BrokerQueryEventListener;
+import org.apache.pinot.spi.eventlistener.query.PinotBrokerQueryEventListenerFactory;
 import org.apache.pinot.spi.exception.BadQueryRequestException;
+import org.apache.pinot.spi.exception.DatabaseConflictException;
 import org.apache.pinot.spi.trace.RequestContext;
 import org.apache.pinot.spi.trace.Tracing;
 import org.apache.pinot.spi.utils.BigDecimalUtils;
@@ -100,6 +103,7 @@ import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Broker;
 import org.apache.pinot.spi.utils.CommonConstants.Broker.Request.QueryOptionKey;
+import org.apache.pinot.spi.utils.DataSizeUtils;
 import org.apache.pinot.spi.utils.TimestampIndexUtils;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.sql.FilterKind;
@@ -209,9 +213,9 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     // TODO: Use different global query id for OFFLINE and REALTIME table after releasing 0.12.0. See QueryIdUtils for
     //       details
     String globalQueryId = getGlobalQueryId(requestId);
-    List<String> serverUrls = new ArrayList<>();
+    List<Pair<String, String>> serverUrls = new ArrayList<>();
     for (ServerInstance serverInstance : queryServers._servers) {
-      serverUrls.add(String.format("%s/query/%s", serverInstance.getAdminEndpoint(), globalQueryId));
+      serverUrls.add(Pair.of(String.format("%s/query/%s", serverInstance.getAdminEndpoint(), globalQueryId), null));
     }
     LOGGER.debug("Cancelling the query: {} via server urls: {}", queryServers._query, serverUrls);
     CompletionService<MultiHttpRequestResponse> completionService =
@@ -253,12 +257,17 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
   @Override
   public BrokerResponse handleRequest(JsonNode request, @Nullable SqlNodeAndOptions sqlNodeAndOptions,
-      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, HttpHeaders httpHeaders)
+      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, @Nullable HttpHeaders httpHeaders)
       throws Exception {
     requestContext.setRequestArrivalTimeMillis(System.currentTimeMillis());
 
     long requestId = _brokerIdGenerator.get();
     requestContext.setRequestId(requestId);
+    if (httpHeaders != null) {
+      requestContext.setRequestHttpHeaders(httpHeaders.getRequestHeaders().entrySet().stream().filter(
+              entry -> PinotBrokerQueryEventListenerFactory.getAllowlistQueryRequestHeaders().contains(entry.getKey()))
+          .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+    }
 
     // First-stage access control to prevent unauthenticated requests from using up resources. Secondary table-level
     // check comes later.
@@ -298,7 +307,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
   protected BrokerResponse handleRequest(long requestId, String query, @Nullable SqlNodeAndOptions sqlNodeAndOptions,
       JsonNode request, @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext,
-      HttpHeaders httpHeaders)
+      @Nullable HttpHeaders httpHeaders)
       throws Exception {
     LOGGER.debug("SQL query for request {}: {}", requestId, query);
 
@@ -366,16 +375,26 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
         return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e));
       }
 
-      String tableName = getActualTableName(dataSource.getTableName(), _tableCache);
+      boolean ignoreCase = _tableCache.isIgnoreCase();
+      String tableName;
+      try {
+        tableName =
+            getActualTableName(DatabaseUtils.translateTableName(dataSource.getTableName(), httpHeaders, ignoreCase),
+                _tableCache);
+      } catch (DatabaseConflictException e) {
+        LOGGER.info("{}. Request {}: {}", e.getMessage(), requestId, query);
+        _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
+        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+        return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
+      }
       dataSource.setTableName(tableName);
       String rawTableName = TableNameBuilder.extractRawTableName(tableName);
       requestContext.setTableName(rawTableName);
 
       try {
-        boolean isCaseInsensitive = _tableCache.isIgnoreCase();
         Map<String, String> columnNameMap = _tableCache.getColumnNameMap(rawTableName);
         if (columnNameMap != null) {
-          updateColumnNames(rawTableName, serverPinotQuery, isCaseInsensitive, columnNameMap);
+          updateColumnNames(rawTableName, serverPinotQuery, ignoreCase, columnNameMap);
         }
       } catch (Exception e) {
         // Throw exceptions with column in-existence error.
@@ -894,7 +913,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
    * <p>Currently only supports subquery within the filter.
    */
   private void handleSubquery(PinotQuery pinotQuery, long requestId, JsonNode jsonRequest,
-      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, HttpHeaders httpHeaders)
+      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, @Nullable HttpHeaders httpHeaders)
       throws Exception {
     Expression filterExpression = pinotQuery.getFilterExpression();
     if (filterExpression != null) {
@@ -910,7 +929,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
    * IN_ID_SET transform function.
    */
   private void handleSubquery(Expression expression, long requestId, JsonNode jsonRequest,
-      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, HttpHeaders httpHeaders)
+      @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext, @Nullable HttpHeaders httpHeaders)
       throws Exception {
     Function function = expression.getFunctionCall();
     if (function == null) {
@@ -940,27 +959,16 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   /**
    * Resolves the actual table name for:
    * - Case-insensitive cluster
-   * - Table name in the format of [database_name].[table_name]
    *
    * @param tableName the table name in the query
    * @param tableCache the table case-sensitive cache
-   * @return table name if the table name is found in Pinot registry, drop the database_name in the format
-   *  of [database_name].[table_name] if only [table_name] is found in Pinot registry.
+   * @return table name if the table name is found in Pinot registry.
    */
   @VisibleForTesting
   static String getActualTableName(String tableName, TableCache tableCache) {
     String actualTableName = tableCache.getActualTableName(tableName);
     if (actualTableName != null) {
       return actualTableName;
-    }
-
-    // Check if table is in the format of [database_name].[table_name]
-    String[] tableNameSplits = StringUtils.split(tableName, ".", 2);
-    if (tableNameSplits.length == 2) {
-      actualTableName = tableCache.getActualTableName(tableNameSplits[1]);
-      if (actualTableName != null) {
-        return actualTableName;
-      }
     }
     return tableName;
   }
@@ -1645,7 +1653,8 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   /**
    * Returns the actual column name for the given column name for:
    * - Case-insensitive cluster
-   * - Column name in the format of [table_name].[column_name]
+   * - Column name in the format of [{@code rawTableName}].[column_name]
+   * - Column name in the format of [logical_table_name].[column_name] while {@code rawTableName} is a translated name
    */
   @VisibleForTesting
   static String getActualColumnName(String rawTableName, String columnName, @Nullable Map<String, String> columnNameMap,
@@ -1653,13 +1662,9 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     if ("*".equals(columnName)) {
       return columnName;
     }
-    String columnNameToCheck;
-    if (columnName.regionMatches(ignoreCase, 0, rawTableName, 0, rawTableName.length())
-        && columnName.length() > rawTableName.length() && columnName.charAt(rawTableName.length()) == '.') {
-      columnNameToCheck = ignoreCase ? columnName.substring(rawTableName.length() + 1).toLowerCase()
-          : columnName.substring(rawTableName.length() + 1);
-    } else {
-      columnNameToCheck = ignoreCase ? columnName.toLowerCase() : columnName;
+    String columnNameToCheck = trimTableName(rawTableName, columnName, ignoreCase);
+    if (ignoreCase) {
+      columnNameToCheck = columnNameToCheck.toLowerCase();
     }
     if (columnNameMap != null) {
       String actualColumnName = columnNameMap.get(columnNameToCheck);
@@ -1671,6 +1676,26 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
       return columnName;
     }
     throw new BadQueryRequestException("Unknown columnName '" + columnName + "' found in the query");
+  }
+
+  private static String trimTableName(String rawTableName, String columnName, boolean ignoreCase) {
+    int columnNameLength = columnName.length();
+    int rawTableNameLength = rawTableName.length();
+    if (columnNameLength > rawTableNameLength && columnName.charAt(rawTableNameLength) == '.'
+        && columnName.regionMatches(ignoreCase, 0, rawTableName, 0, rawTableNameLength)) {
+      return columnName.substring(rawTableNameLength + 1);
+    }
+    // Check if raw table name is translated name ([database_name].[logical_table_name]])
+    String[] split = StringUtils.split(rawTableName, '.');
+    if (split.length == 2) {
+      String logicalTableName = split[1];
+      int logicalTableNameLength = logicalTableName.length();
+      if (columnNameLength > logicalTableNameLength && columnName.charAt(logicalTableNameLength) == '.'
+          && columnName.regionMatches(ignoreCase, 0, logicalTableName, 0, logicalTableNameLength)) {
+        return columnName.substring(logicalTableNameLength + 1);
+      }
+    }
+    return columnName;
   }
 
   /**
@@ -1767,17 +1792,17 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     }
 
     // BrokerConfig
-    Long maxServerResponseSizeBrokerConfig =
-        _config.getProperty(Broker.CONFIG_OF_MAX_SERVER_RESPONSE_SIZE_BYTES, Long.class);
+    String maxServerResponseSizeBrokerConfig = _config.getProperty(Broker.CONFIG_OF_MAX_SERVER_RESPONSE_SIZE_BYTES);
     if (maxServerResponseSizeBrokerConfig != null) {
-      queryOptions.put(QueryOptionKey.MAX_SERVER_RESPONSE_SIZE_BYTES, Long.toString(maxServerResponseSizeBrokerConfig));
+      queryOptions.put(QueryOptionKey.MAX_SERVER_RESPONSE_SIZE_BYTES,
+          Long.toString(DataSizeUtils.toBytes(maxServerResponseSizeBrokerConfig)));
       return;
     }
-    Long maxQueryResponseSizeBrokerConfig =
-        _config.getProperty(Broker.CONFIG_OF_MAX_QUERY_RESPONSE_SIZE_BYTES, Long.class);
+
+    String maxQueryResponseSizeBrokerConfig = _config.getProperty(Broker.CONFIG_OF_MAX_QUERY_RESPONSE_SIZE_BYTES);
     if (maxQueryResponseSizeBrokerConfig != null) {
       queryOptions.put(QueryOptionKey.MAX_SERVER_RESPONSE_SIZE_BYTES,
-          Long.toString(maxQueryResponseSizeBrokerConfig / numServers));
+          Long.toString(DataSizeUtils.toBytes(maxQueryResponseSizeBrokerConfig) / numServers));
     }
   }
 

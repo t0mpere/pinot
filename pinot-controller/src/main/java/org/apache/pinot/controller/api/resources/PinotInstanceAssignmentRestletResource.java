@@ -43,6 +43,7 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -51,6 +52,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.common.assignment.InstanceAssignmentConfigUtils;
 import org.apache.pinot.common.assignment.InstancePartitions;
 import org.apache.pinot.common.assignment.InstancePartitionsUtils;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.config.TableConfigUtils;
 import org.apache.pinot.controller.api.access.AccessType;
 import org.apache.pinot.controller.api.access.Authenticate;
@@ -69,12 +71,18 @@ import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.pinot.spi.utils.CommonConstants.*;
+import static org.apache.pinot.spi.utils.CommonConstants.DATABASE;
+import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
 
-@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
-@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+@Api(tags = Constants.TABLE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY),
+    @Authorization(value = DATABASE)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = {
+    @ApiKeyAuthDefinition(name = HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER,
+        key = SWAGGER_AUTHORIZATION_KEY),
+    @ApiKeyAuthDefinition(name = DATABASE, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = DATABASE,
+        description = "Database context passed through http header. If no context is provided 'default' database "
+            + "context will be considered.")}))
 @Path("/")
 public class PinotInstanceAssignmentRestletResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotInstanceAssignmentRestletResource.class);
@@ -89,7 +97,9 @@ public class PinotInstanceAssignmentRestletResource {
   @ApiOperation(value = "Get the instance partitions")
   public Map<String, InstancePartitions> getInstancePartitions(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type) {
+      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type,
+      @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     Map<String, InstancePartitions> instancePartitionsMap = new TreeMap<>();
 
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
@@ -159,7 +169,9 @@ public class PinotInstanceAssignmentRestletResource {
   public Map<String, InstancePartitions> assignInstances(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
       @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type,
-      @ApiParam(value = "Whether to do dry-run") @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
+      @ApiParam(value = "Whether to do dry-run") @DefaultValue("false") @QueryParam("dryRun") boolean dryRun,
+      @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     Map<String, InstancePartitions> instancePartitionsMap = new TreeMap<>();
     List<InstanceConfig> instanceConfigs = _resourceManager.getAllHelixInstanceConfigs();
 
@@ -315,7 +327,9 @@ public class PinotInstanceAssignmentRestletResource {
   @Authenticate(AccessType.UPDATE)
   @ApiOperation(value = "Create/update the instance partitions")
   public Map<String, InstancePartitions> setInstancePartitions(
-      @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName, String instancePartitionsStr) {
+      @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName, String instancePartitionsStr,
+      @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     InstancePartitions instancePartitions;
     try {
       instancePartitions = JsonUtils.stringToObject(instancePartitionsStr, InstancePartitions.class);
@@ -372,7 +386,8 @@ public class PinotInstanceAssignmentRestletResource {
   public SuccessResponse removeInstancePartitions(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
       @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable
-          String instancePartitionsType) {
+      String instancePartitionsType, @Context HttpHeaders headers) {
+    tableName = DatabaseUtils.translateTableName(tableName, headers);
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
     if (tableType != TableType.REALTIME && (InstancePartitionsType.OFFLINE.toString().equals(instancePartitionsType)
@@ -425,14 +440,12 @@ public class PinotInstanceAssignmentRestletResource {
   @ApiOperation(value = "Replace an instance in the instance partitions")
   public Map<String, InstancePartitions> replaceInstance(
       @ApiParam(value = "Name of the table") @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable
-          String type,
+      @ApiParam(value = "OFFLINE|CONSUMING|COMPLETED|tier name") @QueryParam("type") @Nullable String type,
       @ApiParam(value = "Old instance to be replaced", required = true) @QueryParam("oldInstanceId")
           String oldInstanceId,
       @ApiParam(value = "New instance to replace with", required = true) @QueryParam("newInstanceId")
-          String newInstanceId) {
-    Map<String, InstancePartitions> instancePartitionsMap =
-        getInstancePartitions(tableName, type);
+          String newInstanceId, @Context HttpHeaders headers) {
+    Map<String, InstancePartitions> instancePartitionsMap = getInstancePartitions(tableName, type, headers);
     Iterator<InstancePartitions> iterator = instancePartitionsMap.values().iterator();
     while (iterator.hasNext()) {
       InstancePartitions instancePartitions = iterator.next();

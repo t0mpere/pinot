@@ -33,6 +33,7 @@ import org.apache.pinot.spi.config.table.DedupConfig;
 import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.config.table.FieldConfig.CompressionCodec;
 import org.apache.pinot.spi.config.table.HashFunction;
+import org.apache.pinot.spi.config.table.IndexingConfig;
 import org.apache.pinot.spi.config.table.ReplicaGroupStrategyConfig;
 import org.apache.pinot.spi.config.table.RoutingConfig;
 import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
@@ -293,6 +294,9 @@ public class TableConfigUtilsTest {
     }
 
     // using a transformation column in an aggregation
+    IndexingConfig indexingConfig = new IndexingConfig();
+    indexingConfig.setNoDictionaryColumns(List.of("twiceSum"));
+    tableConfig.setIndexingConfig(indexingConfig);
     schema =
         new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addMetric("twiceSum", FieldSpec.DataType.DOUBLE).build();
     ingestionConfig.setTransformConfigs(Collections.singletonList(new TransformConfig("twice", "col * 2")));
@@ -303,6 +307,7 @@ public class TableConfigUtilsTest {
     schema =
         new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addSingleValueDimension("myCol", FieldSpec.DataType.STRING)
             .build();
+    indexingConfig.setNoDictionaryColumns(List.of("myCol"));
     ingestionConfig.setAggregationConfigs(null);
     ingestionConfig.setTransformConfigs(Collections.singletonList(new TransformConfig("myCol", "reverse(anotherCol)")));
     TableConfigUtils.validate(tableConfig, schema);
@@ -509,6 +514,27 @@ public class TableConfigUtilsTest {
     }
 
     ingestionConfig.setAggregationConfigs(Collections.singletonList(new AggregationConfig("m1", "SUM(m1)")));
+    try {
+      TableConfigUtils.validateIngestionConfig(tableConfig, schema);
+      Assert.fail("Should fail due to noDictionaryColumns being null");
+    } catch (IllegalStateException e) {
+      // expected
+    }
+
+    IndexingConfig indexingConfig = new IndexingConfig();
+    indexingConfig.setNoDictionaryColumns(List.of());
+    tableConfig.setIndexingConfig(indexingConfig);
+
+    try {
+      TableConfigUtils.validateIngestionConfig(tableConfig, schema);
+      Assert.fail("Should fail due to noDictionaryColumns not containing m1");
+    } catch (IllegalStateException e) {
+      // expected
+    }
+
+    indexingConfig.setNoDictionaryColumns(List.of("m1"));
+
+    ingestionConfig.setAggregationConfigs(Collections.singletonList(new AggregationConfig("m1", "SUM(m1)")));
     TableConfigUtils.validateIngestionConfig(tableConfig, schema);
 
     ingestionConfig.setAggregationConfigs(Collections.singletonList(new AggregationConfig("m1", "SUM(s1)")));
@@ -528,7 +554,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1")).build();
 
     try {
       TableConfigUtils.validateIngestionConfig(tableConfig, schema);
@@ -549,7 +575,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1", "d2", "d3", "d4", "d5")).build();
 
     try {
       TableConfigUtils.validateIngestionConfig(tableConfig, schema);
@@ -567,7 +593,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1", "d2", "d3", "d4", "d5")).build();
 
     try {
       TableConfigUtils.validateIngestionConfig(tableConfig, schema);
@@ -582,7 +608,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1")).build();
 
     try {
       TableConfigUtils.validateIngestionConfig(tableConfig, schema);
@@ -594,7 +620,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1")).build();
 
     try {
       TableConfigUtils.validateIngestionConfig(tableConfig, schema);
@@ -616,7 +642,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1", "d2", "d3", "d4", "d5")).build();
     TableConfigUtils.validateIngestionConfig(tableConfig, schema);
 
     // with too many arguments should fail
@@ -629,7 +655,7 @@ public class TableConfigUtilsTest {
     ingestionConfig.setAggregationConfigs(aggregationConfigs);
     tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
-            .setIngestionConfig(ingestionConfig).build();
+            .setIngestionConfig(ingestionConfig).setNoDictionaryColumns(List.of("d1")).build();
 
     try {
       TableConfigUtils.validateIngestionConfig(tableConfig, schema);
@@ -663,28 +689,31 @@ public class TableConfigUtilsTest {
     // validate the proto decoder
     streamConfigs = getKafkaStreamConfigs();
     //test config should be valid
-    TableConfigUtils.validateDecoder(new StreamConfig("test", streamConfigs));
+    TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
     streamConfigs.remove("stream.kafka.decoder.prop.descriptorFile");
     try {
-      TableConfigUtils.validateDecoder(new StreamConfig("test", streamConfigs));
+      TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
+      Assert.fail("Should fail without descriptor file");
     } catch (IllegalStateException e) {
       // expected
     }
     streamConfigs = getKafkaStreamConfigs();
     streamConfigs.remove("stream.kafka.decoder.prop.protoClassName");
     try {
-      TableConfigUtils.validateDecoder(new StreamConfig("test", streamConfigs));
+      TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
+      Assert.fail("Should fail without descriptor proto class name");
     } catch (IllegalStateException e) {
       // expected
     }
     //validate the protobuf pulsar config
     streamConfigs = getPulsarStreamConfigs();
     //test config should be valid
-    TableConfigUtils.validateDecoder(new StreamConfig("test", streamConfigs));
+    TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
     //remove the descriptor file, should fail
     streamConfigs.remove("stream.pulsar.decoder.prop.descriptorFile");
     try {
-      TableConfigUtils.validateDecoder(new StreamConfig("test", streamConfigs));
+      TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
+      Assert.fail("Should fail without descriptor file");
     } catch (IllegalStateException e) {
       // expected
     }
@@ -692,55 +721,31 @@ public class TableConfigUtilsTest {
     //remove the proto class name, should fail
     streamConfigs.remove("stream.pulsar.decoder.prop.protoClassName");
     try {
-      TableConfigUtils.validateDecoder(new StreamConfig("test", streamConfigs));
+      TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
+      Assert.fail("Should fail without descriptor proto class name");
     } catch (IllegalStateException e) {
       // expected
     }
 
-    Schema schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME)
-        .addDateTime(TIME_COLUMN, FieldSpec.DataType.LONG, "1:MILLISECONDS:EPOCH", "1:MILLISECONDS").build();
-
-    // When size based threshold is specified, default rows does not work, it has to be explicitly set to 0.
+    // When size based threshold is specified, default rows should not be set
     streamConfigs = getKafkaStreamConfigs();
     streamConfigs.remove(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_SEGMENT_SIZE);
     streamConfigs.remove(StreamConfigProperties.DEPRECATED_SEGMENT_FLUSH_DESIRED_SIZE);
     streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_SEGMENT_SIZE, "100m");
     streamConfigs.remove(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS);
-    ingestionConfig.setStreamIngestionConfig(new StreamIngestionConfig(List.of(streamConfigs)));
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN)
-        .setIngestionConfig(ingestionConfig).build();
+    TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
 
-    try {
-      TableConfigUtils.validate(tableConfig, schema);
-      Assert.fail();
-    } catch (IllegalStateException e) {
-      Assert.assertTrue(e.getMessage().contains("must be set to 0"));
-    }
-
-    // When size based threshold is specified, rows has to be set to 0.
     streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "1000");
-    ingestionConfig.setStreamIngestionConfig(new StreamIngestionConfig(List.of(streamConfigs)));
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName("timeColumn")
-        .setIngestionConfig(ingestionConfig).build();
-
     try {
-      TableConfigUtils.validate(tableConfig, schema);
-      Assert.fail();
+      TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
+      Assert.fail("Should fail when both rows and size based threshold are specified");
     } catch (IllegalStateException e) {
-      Assert.assertTrue(e.getMessage().contains("must be set to 0"));
+      // expected
     }
 
-    // When size based threshold is specified, rows has to be set to 0.
+    // Legacy behavior: allow size based threshold to be explicitly set to 0
     streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
-    ingestionConfig.setStreamIngestionConfig(new StreamIngestionConfig(List.of(streamConfigs)));
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName("timeColumn")
-        .setIngestionConfig(ingestionConfig).build();
-
-    try {
-      TableConfigUtils.validate(tableConfig, schema);
-    } catch (IllegalStateException e) {
-      Assert.fail(e.getMessage());
-    }
+    TableConfigUtils.validateStreamConfig(new StreamConfig("test", streamConfigs));
   }
 
   @Test
@@ -961,39 +966,30 @@ public class TableConfigUtilsTest {
 
   @Test
   public void testTableName() {
-    String[] malformedTableName = {"test.table", "test table"};
+    String[] malformedTableName = {"test.test.table", "test table"};
     for (int i = 0; i < 2; i++) {
       String tableName = malformedTableName[i];
       TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(tableName).build();
       try {
-        TableConfigUtils.validateTableName(tableConfig, CommonConstants.Helix.DEFAULT_ALLOW_TABLE_NAME_WITH_DATABASE);
+        TableConfigUtils.validateTableName(tableConfig);
         Assert.fail("Should fail for malformed table name : " + tableName);
       } catch (IllegalStateException e) {
         // expected
       }
     }
 
-    String allowedWithConfig = "test.table";
-    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(allowedWithConfig).build();
-    try {
-      TableConfigUtils.validateTableName(tableConfig, true);
-    } catch (IllegalStateException e) {
-      Assert.fail("Should allow table name with dot if configuration is turned on");
-    }
-
-    String rejected = "test.another.table";
-    tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(rejected).build();
-    try {
-      TableConfigUtils.validateTableName(tableConfig, true);
-      Assert.fail("Should fail for malformed table name : " + rejected);
-    } catch (IllegalStateException e) {
-      // expected
+    String[] allowedTableName = {"test.table", "testTable"};
+    for (int i = 0; i < 2; i++) {
+      String tableName = allowedTableName[i];
+      TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(tableName).build();
+      TableConfigUtils.validateTableName(tableConfig);
     }
   }
 
   @Test
   public void testValidateFieldConfig() {
     Schema schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME)
+        .addDateTime(TIME_COLUMN, FieldSpec.DataType.LONG, "1:HOURS:EPOCH", "1:HOURS")
         .addSingleValueDimension("myCol1", FieldSpec.DataType.STRING)
         .addMultiValueDimension("myCol2", FieldSpec.DataType.INT)
         .addSingleValueDimension("intCol", FieldSpec.DataType.INT).build();
@@ -1195,7 +1191,7 @@ public class TableConfigUtilsTest {
       Assert.fail("Should fail for MV myCol2 with forward index disabled but has range and inverted index");
     } catch (Exception e) {
       Assert.assertEquals(e.getMessage(), "Feature not supported for multi-value columns with range index. "
-          + "Cannot disable forward index for column myCol2. Disable range index on this column to use this feature");
+          + "Cannot disable forward index for column myCol2. Disable range index on this column to use this feature.");
     }
 
     tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME)
@@ -1215,7 +1211,7 @@ public class TableConfigUtilsTest {
     } catch (Exception e) {
       Assert.assertEquals(e.getMessage(), "Feature not supported for single-value columns with range index version "
           + "< 2. Cannot disable forward index for column myCol1. Either disable range index or create range index "
-          + "with version >= 2 to use this feature");
+          + "with version >= 2 to use this feature.");
     }
 
     tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME)
@@ -1281,6 +1277,24 @@ public class TableConfigUtilsTest {
       TableConfigUtils.validate(tableConfig, schema);
     } catch (Exception e) {
       Assert.fail("Range index with forward index disabled no dictionary column is allowed");
+    }
+
+    // Disabling forward index for realtime table will make the validation failed.
+    Map<String, String> streamConfigs = getStreamConfigs();
+    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN)
+        .setNoDictionaryColumns(Arrays.asList("intCol")).setStreamConfigs(streamConfigs).build();
+    try {
+      // Enable forward index disabled flag for a column with inverted index index and disable dictionary
+      Map<String, String> fieldConfigProperties = new HashMap<>();
+      fieldConfigProperties.put(FieldConfig.FORWARD_INDEX_DISABLED, Boolean.TRUE.toString());
+      FieldConfig fieldConfig =
+          new FieldConfig("intCol", FieldConfig.EncodingType.RAW, FieldConfig.IndexType.INVERTED, null, null, null,
+              fieldConfigProperties);
+      tableConfig.setFieldConfigList(Arrays.asList(fieldConfig));
+      TableConfigUtils.validate(tableConfig, schema);
+    } catch (Exception e) {
+      Assert.assertEquals(e.getMessage(),
+          "Cannot disable forward index for column intCol, as the table type is REALTIME.");
     }
   }
 
@@ -1609,15 +1623,15 @@ public class TableConfigUtilsTest {
         Collections.singletonList(
             new AggregationFunctionColumnPair(AggregationFunctionType.COUNT, "myCol").toColumnName()), null, 10);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME)
-        .setDedupConfig(new DedupConfig(true, HashFunction.NONE))
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setDedupConfig(new DedupConfig(true, HashFunction.NONE)).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStarTreeIndexConfigs(Lists.newArrayList(starTreeIndexConfig)).setStreamConfigs(streamConfigs).build();
     TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
 
     // Dedup and upsert can't be enabled simultaneously
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME)
-        .setDedupConfig(new DedupConfig(true, HashFunction.NONE))
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setDedupConfig(new DedupConfig(true, HashFunction.NONE)).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL)).setStreamConfigs(streamConfigs).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1668,7 +1682,8 @@ public class TableConfigUtilsTest {
     // invalid tag override with upsert
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN)
         .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL)).setStreamConfigs(getStreamConfigs())
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setTagOverrideConfig(new TagOverrideConfig("T1_REALTIME", "T2_REALTIME")).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1677,22 +1692,31 @@ public class TableConfigUtilsTest {
       Assert.assertEquals(e.getMessage(), "Invalid tenant tag override used for Upsert/Dedup table");
     }
 
-    // valid tag override with upsert
+    // tag override even with same tag for CONSUMING and COMPLETED with upsert should fail
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN)
         .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL)).setStreamConfigs(getStreamConfigs())
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setTagOverrideConfig(new TagOverrideConfig("T1_REALTIME", "T1_REALTIME")).build();
-    TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
+
+    try {
+      TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
+      Assert.fail("Tag override must not be allowed with upsert");
+    } catch (IllegalStateException e) {
+      Assert.assertEquals(e.getMessage(), "Invalid tenant tag override used for Upsert/Dedup table");
+    }
 
     // empty tag override with upsert should pass
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN)
         .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL)).setStreamConfigs(getStreamConfigs())
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setTagOverrideConfig(new TagOverrideConfig(null, null)).build();
     TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
 
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStreamConfigs(streamConfigs).build();
     TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
 
@@ -1700,7 +1724,8 @@ public class TableConfigUtilsTest {
         Collections.singletonList(
             new AggregationFunctionColumnPair(AggregationFunctionType.COUNT, "myCol").toColumnName()), null, 10);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStarTreeIndexConfigs(Lists.newArrayList(starTreeIndexConfig)).setStreamConfigs(streamConfigs).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1711,7 +1736,8 @@ public class TableConfigUtilsTest {
 
     //With Aggregate Metrics
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStreamConfigs(streamConfigs).setAggregateMetrics(true).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1724,7 +1750,8 @@ public class TableConfigUtilsTest {
     IngestionConfig ingestionConfig = new IngestionConfig();
     ingestionConfig.setAggregationConfigs(Collections.singletonList(new AggregationConfig("twiceSum", "SUM(twice)")));
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStreamConfigs(streamConfigs).setIngestionConfig(ingestionConfig).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1735,7 +1762,8 @@ public class TableConfigUtilsTest {
 
     //With aggregation Configs in Ingestion Config and IndexingConfig at the same time
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStreamConfigs(streamConfigs).setAggregateMetrics(true).setIngestionConfig(ingestionConfig).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1763,8 +1791,8 @@ public class TableConfigUtilsTest {
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setDeleteRecordColumn(stringTypeDelCol);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-        .setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1775,8 +1803,8 @@ public class TableConfigUtilsTest {
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setDeleteRecordColumn(delCol);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-        .setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1787,9 +1815,8 @@ public class TableConfigUtilsTest {
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setDeleteRecordColumn(timestampCol);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-            .setUpsertConfig(upsertConfig)
-            .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
-            .build();
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false)).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
       Assert.fail("Should have failed table creation when delete column type is timestamp.");
@@ -1801,8 +1828,8 @@ public class TableConfigUtilsTest {
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setDeleteRecordColumn(invalidCol);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-        .setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1814,8 +1841,8 @@ public class TableConfigUtilsTest {
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setDeleteRecordColumn(mvCol);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-        .setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1826,14 +1853,13 @@ public class TableConfigUtilsTest {
 
     // upsert deleted-keys-ttl configs with no deleted column
     schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).setPrimaryKeyColumns(Lists.newArrayList("myPkCol"))
-            .addSingleValueDimension("myCol", FieldSpec.DataType.STRING)
-            .addSingleValueDimension(delCol, FieldSpec.DataType.BOOLEAN).build();
+        .addSingleValueDimension("myCol", FieldSpec.DataType.STRING)
+        .addSingleValueDimension(delCol, FieldSpec.DataType.BOOLEAN).build();
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setDeletedKeysTTL(3600);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-            .setUpsertConfig(upsertConfig)
-            .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
-            .build();
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false)).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
     } catch (IllegalStateException e) {
@@ -1843,14 +1869,13 @@ public class TableConfigUtilsTest {
     upsertConfig.setDeleteRecordColumn(delCol);
     // multiple comparison columns set for deleted-keys-ttl
     schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).setPrimaryKeyColumns(Lists.newArrayList("myPkCol"))
-            .addSingleValueDimension("myCol", FieldSpec.DataType.STRING)
-            .addDateTime(TIME_COLUMN, FieldSpec.DataType.LONG, "1:MILLISECONDS:EPOCH", "1:MILLISECONDS")
-            .addSingleValueDimension(delCol, FieldSpec.DataType.BOOLEAN).build();
+        .addSingleValueDimension("myCol", FieldSpec.DataType.STRING)
+        .addDateTime(TIME_COLUMN, FieldSpec.DataType.LONG, "1:MILLISECONDS:EPOCH", "1:MILLISECONDS")
+        .addSingleValueDimension(delCol, FieldSpec.DataType.BOOLEAN).build();
     upsertConfig.setComparisonColumns(Lists.newArrayList(TIME_COLUMN, "myCol"));
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-            .setUpsertConfig(upsertConfig)
-            .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
-            .build();
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false)).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
     } catch (IllegalStateException e) {
@@ -1861,9 +1886,8 @@ public class TableConfigUtilsTest {
     // comparison column with non-numeric type
     upsertConfig.setComparisonColumns(Lists.newArrayList("myCol"));
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-            .setUpsertConfig(upsertConfig)
-            .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
-            .build();
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false)).build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
     } catch (IllegalStateException e) {
@@ -1874,9 +1898,8 @@ public class TableConfigUtilsTest {
     // time column as comparison column
     upsertConfig.setComparisonColumns(Lists.newArrayList(TIME_COLUMN));
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-            .setUpsertConfig(upsertConfig)
-            .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
-            .build();
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false)).build();
     TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
 
     // upsert out-of-order configs
@@ -1892,8 +1915,8 @@ public class TableConfigUtilsTest {
     upsertConfig.setDropOutOfOrderRecord(dropOutOfOrderRecord);
     upsertConfig.setOutOfOrderRecordColumn(outOfOrderRecordColumn);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-        .setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1912,8 +1935,8 @@ public class TableConfigUtilsTest {
     upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
     upsertConfig.setOutOfOrderRecordColumn(outOfOrderRecordColumn);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setStreamConfigs(streamConfigs)
-        .setUpsertConfig(upsertConfig)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(upsertConfig).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .build();
     try {
       TableConfigUtils.validateUpsertAndDedupConfig(tableConfig, schema);
@@ -1940,8 +1963,8 @@ public class TableConfigUtilsTest {
     partialUpsertConfig.setComparisonColumn("myCol2");
     TableConfig tableConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setUpsertConfig(partialUpsertConfig)
-            .setNullHandlingEnabled(true)
-            .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+            .setNullHandlingEnabled(true).setRoutingConfig(
+                new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
             .setStreamConfigs(streamConfigs).build();
     try {
       TableConfigUtils.validatePartialUpsertStrategies(tableConfig, schema);
@@ -1954,8 +1977,8 @@ public class TableConfigUtilsTest {
     partialUpsertConfig.setPartialUpsertStrategies(partialUpsertStratgies);
     partialUpsertConfig.setDefaultPartialUpsertStrategy(UpsertConfig.Strategy.OVERWRITE);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName("myCol2")
-        .setUpsertConfig(partialUpsertConfig).setNullHandlingEnabled(true)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(partialUpsertConfig).setNullHandlingEnabled(true).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStreamConfigs(streamConfigs).build();
     try {
       TableConfigUtils.validatePartialUpsertStrategies(tableConfig, schema);
@@ -1966,8 +1989,8 @@ public class TableConfigUtilsTest {
 
     partialUpsertStratgies.put("myCol1", UpsertConfig.Strategy.INCREMENT);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName("timeCol")
-        .setUpsertConfig(partialUpsertConfig).setNullHandlingEnabled(false)
-        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setUpsertConfig(partialUpsertConfig).setNullHandlingEnabled(false).setRoutingConfig(
+            new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE, false))
         .setStreamConfigs(streamConfigs).build();
     try {
       TableConfigUtils.validatePartialUpsertStrategies(tableConfig, schema);
@@ -2291,8 +2314,10 @@ public class TableConfigUtilsTest {
     Map<String, String> upsertCompactionTaskConfig =
         ImmutableMap.of("bufferTimePeriod", "5d", "invalidRecordsThresholdPercent", "1", "invalidRecordsThresholdCount",
             "1");
+    UpsertConfig upsertConfig = new UpsertConfig(UpsertConfig.Mode.FULL);
+    upsertConfig.setEnableSnapshot(true);
     TableConfig tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME)
-        .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL))
+        .setUpsertConfig(upsertConfig)
         .setTaskConfig(new TableTaskConfig(ImmutableMap.of("UpsertCompactionTask", upsertCompactionTaskConfig)))
         .build();
 
@@ -2301,7 +2326,7 @@ public class TableConfigUtilsTest {
     // test with invalid invalidRecordsThresholdPercents
     upsertCompactionTaskConfig = ImmutableMap.of("invalidRecordsThresholdPercent", "0");
     TableConfig zeroPercentTableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME)
-        .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL))
+        .setUpsertConfig(upsertConfig)
         .setTaskConfig(new TableTaskConfig(ImmutableMap.of("UpsertCompactionTask", upsertCompactionTaskConfig)))
         .build();
     Assert.assertThrows(IllegalStateException.class,

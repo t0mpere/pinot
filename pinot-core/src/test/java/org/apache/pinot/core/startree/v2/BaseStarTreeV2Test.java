@@ -47,6 +47,7 @@ import org.apache.pinot.segment.local.startree.v2.builder.MultipleTreesBuilder;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 import org.apache.pinot.segment.spi.Constants;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
@@ -91,32 +92,42 @@ abstract class BaseStarTreeV2Test<R, A> {
 
   private static final int NUM_SEGMENT_RECORDS = 100_000;
   private static final int MAX_LEAF_RECORDS = RANDOM.nextInt(100) + 1;
-  private static final String DIMENSION_D1 = "d1";
-  private static final String DIMENSION_D2 = "d2";
+  // Using column names with '__' to make sure regular table columns with '__' in the name aren't wrongly interpreted
+  // as AggregationFunctionColumnPair
+  private static final String DIMENSION_D1 = "d1__COLUMN_NAME";
+  private static final String DIMENSION_D2 = "__d2";
   private static final int DIMENSION_CARDINALITY = 100;
   private static final String METRIC = "m";
 
   // Supported filters
-  private static final String QUERY_FILTER_AND = " WHERE d1 = 0 AND d2 < 10";
+  private static final String QUERY_FILTER_AND = " WHERE d1__COLUMN_NAME = 0 AND __d2 < 10";
   // StarTree supports OR predicates only on a single dimension
-  private static final String QUERY_FILTER_OR = " WHERE d1 > 10 OR d1 < 50";
-  private static final String QUERY_FILTER_COMPLEX_OR_MULTIPLE_DIMENSIONS = " WHERE d2 < 95 AND (d1 > 10 OR d1 < 50)";
+  private static final String QUERY_FILTER_OR = " WHERE d1__COLUMN_NAME > 10 OR d1__COLUMN_NAME < 50";
+  private static final String QUERY_FILTER_NOT = " WHERE NOT d1__COLUMN_NAME > 10";
+  private static final String QUERY_FILTER_AND_NOT = " WHERE d1__COLUMN_NAME > 10 AND NOT __d2 < 10";
+  private static final String QUERY_FILTER_OR_NOT = " WHERE d1__COLUMN_NAME > 50 OR NOT d1__COLUMN_NAME > 10";
+  private static final String QUERY_NOT_NOT = " WHERE NOT NOT d1__COLUMN_NAME > 10";
+  private static final String QUERY_FILTER_COMPLEX_OR_MULTIPLE_DIMENSIONS =
+      " WHERE __d2 < 95 AND (NOT d1__COLUMN_NAME > 10 OR d1__COLUMN_NAME > 50)";
   private static final String QUERY_FILTER_COMPLEX_AND_MULTIPLE_DIMENSIONS_THREE_PREDICATES =
-      " WHERE d2 < 95 AND d2 > 25 AND (d1 > 10 OR d1 < 50)";
+      " WHERE __d2 < 95 AND NOT __d2 < 25 AND (d1__COLUMN_NAME > 10 OR d1__COLUMN_NAME < 50)";
   private static final String QUERY_FILTER_COMPLEX_OR_MULTIPLE_DIMENSIONS_THREE_PREDICATES =
-      " WHERE (d2 > 95 OR d2 < 25) AND (d1 > 10 OR d1 < 50)";
-  private static final String QUERY_FILTER_COMPLEX_OR_SINGLE_DIMENSION = " WHERE d1 = 95 AND (d1 > 90 OR d1 < 100)";
+      " WHERE (__d2 > 95 OR __d2 < 25) AND (d1__COLUMN_NAME > 10 OR d1__COLUMN_NAME < 50)";
+  private static final String QUERY_FILTER_COMPLEX_OR_SINGLE_DIMENSION =
+      " WHERE NOT d1__COLUMN_NAME = 95 AND (d1__COLUMN_NAME > 90 OR d1__COLUMN_NAME < 100)";
 
   // Unsupported filters
-  private static final String QUERY_FILTER_OR_MULTIPLE_DIMENSIONS = " WHERE d1 > 10 OR d2 < 50";
-  private static final String QUERY_FILTER_OR_ON_AND = " WHERE (d1 > 10 AND d1 < 50) OR d1 < 50";
-  private static final String QUERY_FILTER_OR_ON_NOT = " WHERE (NOT d1 > 10) OR d1 < 50";
+  private static final String QUERY_FILTER_OR_MULTIPLE_DIMENSIONS = " WHERE d1__COLUMN_NAME > 10 OR __d2 < 50";
+  private static final String QUERY_FILTER_OR_ON_AND =
+      " WHERE (d1__COLUMN_NAME > 10 AND d1__COLUMN_NAME < 50) OR d1__COLUMN_NAME < 50";
+  private static final String QUERY_FILTER_NOT_ON_AND = " WHERE NOT (d1__COLUMN_NAME > 10 AND d1__COLUMN_NAME < 50)";
+  private static final String QUERY_FILTER_NOT_ON_OR = " WHERE NOT (d1__COLUMN_NAME < 10 OR d1__COLUMN_NAME > 50)";
   // Always false filters
-  private static final String QUERY_FILTER_ALWAYS_FALSE = " WHERE d1 > 100";
-  private static final String QUERY_FILTER_OR_ALWAYS_FALSE = " WHERE d1 > 100 OR d1 < 0";
+  private static final String QUERY_FILTER_ALWAYS_FALSE = " WHERE d1__COLUMN_NAME > 100";
+  private static final String QUERY_FILTER_OR_ALWAYS_FALSE = " WHERE d1__COLUMN_NAME > 100 OR d1__COLUMN_NAME < 0";
 
-  private static final String QUERY_GROUP_BY = " GROUP BY d2";
-  private static final String FILTER_AGG_CLAUSE = " FILTER(WHERE d1 > 10)";
+  private static final String QUERY_GROUP_BY = " GROUP BY __d2";
+  private static final String FILTER_AGG_CLAUSE = " FILTER(WHERE d1__COLUMN_NAME > 10)";
 
   private ValueAggregator _valueAggregator;
   private DataType _aggregatedValueType;
@@ -129,16 +140,7 @@ abstract class BaseStarTreeV2Test<R, A> {
       throws Exception {
     _valueAggregator = getValueAggregator();
     _aggregatedValueType = _valueAggregator.getAggregatedValueType();
-    AggregationFunctionType aggregationType = _valueAggregator.getAggregationType();
-    if (aggregationType == AggregationFunctionType.COUNT) {
-      _aggregation = "COUNT(*)";
-    } else if (aggregationType == AggregationFunctionType.PERCENTILEEST
-        || aggregationType == AggregationFunctionType.PERCENTILETDIGEST) {
-      // Append a percentile number for percentile functions
-      _aggregation = String.format("%s(%s, 50)", aggregationType.getName(), METRIC);
-    } else {
-      _aggregation = String.format("%s(%s)", aggregationType.getName(), METRIC);
-    }
+    _aggregation = getAggregation(_valueAggregator.getAggregationType());
 
     Schema.SchemaBuilder schemaBuilder = new Schema.SchemaBuilder().addSingleValueDimension(DIMENSION_D1, DataType.INT)
         .addSingleValueDimension(DIMENSION_D2, DataType.INT);
@@ -185,12 +187,25 @@ abstract class BaseStarTreeV2Test<R, A> {
     _starTreeV2 = _indexSegment.getStarTrees().get(0);
   }
 
+  String getAggregation(AggregationFunctionType aggregationType) {
+    if (aggregationType == AggregationFunctionType.COUNT) {
+      return "COUNT(*)";
+    } else if (aggregationType == AggregationFunctionType.PERCENTILEEST
+        || aggregationType == AggregationFunctionType.PERCENTILETDIGEST) {
+      // Append a percentile number for percentile functions
+      return String.format("%s(%s, 50)", aggregationType.getName(), METRIC);
+    } else {
+      return String.format("%s(%s)", aggregationType.getName(), METRIC);
+    }
+  }
+
   @Test
   public void testUnsupportedFilters() {
     String query = String.format("SELECT %s FROM %s", _aggregation, TABLE_NAME);
     testUnsupportedFilter(query + QUERY_FILTER_OR_MULTIPLE_DIMENSIONS);
     testUnsupportedFilter(query + QUERY_FILTER_OR_ON_AND);
-    testUnsupportedFilter(query + QUERY_FILTER_OR_ON_NOT);
+    testUnsupportedFilter(query + QUERY_FILTER_NOT_ON_AND);
+    testUnsupportedFilter(query + QUERY_FILTER_NOT_ON_OR);
     testUnsupportedFilter(query + QUERY_FILTER_ALWAYS_FALSE);
     testUnsupportedFilter(query + QUERY_FILTER_OR_ALWAYS_FALSE);
   }
@@ -204,6 +219,10 @@ abstract class BaseStarTreeV2Test<R, A> {
       testQuery(query);
       testQuery(query + QUERY_FILTER_AND);
       testQuery(query + QUERY_FILTER_OR);
+      testQuery(query + QUERY_FILTER_NOT);
+      testQuery(query + QUERY_FILTER_AND_NOT);
+      testQuery(query + QUERY_FILTER_OR_NOT);
+      testQuery(query + QUERY_NOT_NOT);
       testQuery(query + QUERY_FILTER_COMPLEX_OR_MULTIPLE_DIMENSIONS);
       testQuery(query + QUERY_FILTER_COMPLEX_AND_MULTIPLE_DIMENSIONS_THREE_PREDICATES);
       testQuery(query + QUERY_FILTER_COMPLEX_OR_MULTIPLE_DIMENSIONS_THREE_PREDICATES);
@@ -222,7 +241,7 @@ abstract class BaseStarTreeV2Test<R, A> {
 
   private void testUnsupportedFilter(String query) {
     QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
-    FilterPlanNode filterPlanNode = new FilterPlanNode(_indexSegment, queryContext);
+    FilterPlanNode filterPlanNode = new FilterPlanNode(new SegmentContext(_indexSegment), queryContext);
     filterPlanNode.run();
     Map<String, List<CompositePredicateEvaluator>> predicateEvaluatorsMap =
         StarTreeUtils.extractPredicateEvaluatorsMap(_indexSegment, queryContext.getFilter(),
@@ -254,7 +273,7 @@ abstract class BaseStarTreeV2Test<R, A> {
     List<String> groupByColumns = new ArrayList<>(groupByColumnSet);
 
     // Filter
-    FilterPlanNode filterPlanNode = new FilterPlanNode(_indexSegment, queryContext);
+    FilterPlanNode filterPlanNode = new FilterPlanNode(new SegmentContext(_indexSegment), queryContext);
     filterPlanNode.run();
     Map<String, List<CompositePredicateEvaluator>> predicateEvaluatorsMap =
         StarTreeUtils.extractPredicateEvaluatorsMap(_indexSegment, queryContext.getFilter(),
@@ -277,7 +296,7 @@ abstract class BaseStarTreeV2Test<R, A> {
         computeStarTreeResult(starTreeFilterPlanNode, starTreeAggregationColumnReaders, starTreeGroupByColumnReaders);
 
     // Extract values without star-tree
-    FilterPlanNode nonStarTreeFilterPlanNode = new FilterPlanNode(_indexSegment, queryContext);
+    FilterPlanNode nonStarTreeFilterPlanNode = new FilterPlanNode(new SegmentContext(_indexSegment), queryContext);
     List<ForwardIndexReader> nonStarTreeAggregationColumnReaders = new ArrayList<>(numAggregations);
     List<Dictionary> nonStarTreeAggregationColumnDictionaries = new ArrayList<>(numAggregations);
     for (AggregationFunctionColumnPair aggregationFunctionColumnPair : aggregationFunctionColumnPairs) {

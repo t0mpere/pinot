@@ -26,6 +26,7 @@ import org.apache.pinot.util.TestUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 
@@ -63,8 +64,9 @@ public class AdminConsoleIntegrationTest extends BaseClusterIntegrationTest {
       throws Exception {
     // test controller
     String response = sendGetRequest(getControllerBaseApiUrl() + "/help");
-    String expected = IOUtils
-        .toString(ControllerAdminApiApplication.class.getClassLoader().getResourceAsStream("api/index.html"), "UTF-8");
+    String expected =
+        IOUtils.toString(ControllerAdminApiApplication.class.getClassLoader().getResourceAsStream("api/index.html"),
+            "UTF-8");
     Assert.assertEquals(response, expected);
     // help and api map to the same content
     response = sendGetRequest(getControllerBaseApiUrl() + "/api");
@@ -72,8 +74,8 @@ public class AdminConsoleIntegrationTest extends BaseClusterIntegrationTest {
 
     // test broker
     response = sendGetRequest(getBrokerBaseApiUrl() + "/help");
-    expected = IOUtils
-        .toString(BrokerAdminApiApplication.class.getClassLoader().getResourceAsStream("api/index.html"), "UTF-8");
+    expected = IOUtils.toString(BrokerAdminApiApplication.class.getClassLoader().getResourceAsStream("api/index.html"),
+        "UTF-8");
     Assert.assertEquals(response, expected);
     // help and api map to the same content
     response = sendGetRequest(getBrokerBaseApiUrl() + "/api");
@@ -81,12 +83,36 @@ public class AdminConsoleIntegrationTest extends BaseClusterIntegrationTest {
     String serverBaseApiUrl = "http://localhost:" + getServerAdminApiPort();
     // test server
     response = sendGetRequest(serverBaseApiUrl + "/help");
-    expected = IOUtils
-        .toString(BrokerAdminApiApplication.class.getClassLoader().getResourceAsStream("api/index.html"), "UTF-8");
+    expected = IOUtils.toString(BrokerAdminApiApplication.class.getClassLoader().getResourceAsStream("api/index.html"),
+        "UTF-8");
     Assert.assertEquals(response, expected);
 
     // help and api map to the same content
     response = sendGetRequest(serverBaseApiUrl + "/api");
     Assert.assertEquals(response, expected);
+  }
+
+  @Test(dataProvider = "endpointBase")
+  public void testSwaggerYaml(final String description, final String endpointBase)
+      throws Exception {
+    String response = sendGetRequest(endpointBase + "/swagger.yaml");
+    Assert.assertTrue(response.startsWith("---\nswagger: \"2.0\""));
+  }
+
+  @Test(dataProvider = "endpointBase")
+  public void testSwaggerJson(final String description, final String endpointBase)
+      throws Exception {
+    String response = sendGetRequest(endpointBase + "/swagger.json");
+    Assert.assertTrue(response.startsWith("{\"swagger\":\"2.0\""));
+    Assert.assertTrue(response.endsWith("}"));
+  }
+
+  @DataProvider
+  public Object[][] endpointBase() {
+    return new Object[][] {
+        new Object[] { "controller", getControllerBaseApiUrl() },
+        new Object[] { "broker", getBrokerBaseApiUrl() },
+        new Object[] { "server", "http://localhost:" + getServerAdminApiPort() }
+    };
   }
 }

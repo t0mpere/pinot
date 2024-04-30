@@ -148,6 +148,17 @@ public class PinotHelixResourceManagerStatelessTest extends ControllerTest {
   }
 
   @Test
+  public void testGetInstancesByTag() {
+    List<String> controllersByTag = _helixResourceManager.getAllInstancesWithTag("controller");
+    List<InstanceConfig> controllerConfigs = _helixResourceManager.getAllControllerInstanceConfigs();
+
+    assertEquals(controllersByTag.size(), controllerConfigs.size());
+    for (InstanceConfig c: controllerConfigs) {
+      assertTrue(controllersByTag.contains(c.getInstanceName()));
+    }
+  }
+
+  @Test
   public void testGetDataInstanceAdminEndpoints()
       throws Exception {
     Set<String> servers = _helixResourceManager.getAllInstancesForServerTenant(SERVER_TENANT_NAME);
@@ -212,6 +223,8 @@ public class PinotHelixResourceManagerStatelessTest extends ControllerTest {
     String instanceName = "Server_localhost_" + NUM_SERVER_INSTANCES;
     List<String> allInstances = _helixResourceManager.getAllInstances();
     assertFalse(allInstances.contains(instanceName));
+    List<String> allLiveInstances = _helixResourceManager.getAllLiveInstances();
+    assertFalse(allLiveInstances.contains(instanceName));
 
     Instance instance = new Instance("localhost", NUM_SERVER_INSTANCES, InstanceType.SERVER,
         Collections.singletonList(Helix.UNTAGGED_SERVER_INSTANCE), null, 0, 0, 0, 0, false);
@@ -223,6 +236,8 @@ public class PinotHelixResourceManagerStatelessTest extends ControllerTest {
     assertTrue(_helixResourceManager.dropInstance(instanceName).isSuccessful());
     allInstances = _helixResourceManager.getAllInstances();
     assertFalse(allInstances.contains(instanceName));
+    allLiveInstances = _helixResourceManager.getAllLiveInstances();
+    assertFalse(allLiveInstances.contains(instanceName));
   }
 
   @Test
@@ -394,6 +409,30 @@ public class PinotHelixResourceManagerStatelessTest extends ControllerTest {
     assertThrows(TableNotFoundException.class, () -> _helixResourceManager.getLiveBrokersForTable("fake"));
     assertThrows(TableNotFoundException.class, () -> _helixResourceManager.getLiveBrokersForTable("fake_OFFLINE"));
     assertThrows(TableNotFoundException.class, () -> _helixResourceManager.getLiveBrokersForTable("fake_REALTIME"));
+
+    // Test retrieving table name to live broker mapping for table without type suffix
+    Map<String, List<InstanceInfo>> rawTableToLiveBrokersMapping =
+        _helixResourceManager.getTableToLiveBrokersMapping(null, List.of(RAW_TABLE_NAME));
+    assertEquals(rawTableToLiveBrokersMapping.size(), 2);
+    assertEquals(rawTableToLiveBrokersMapping.get(OFFLINE_TABLE_NAME).size(), NUM_BROKER_INSTANCES);
+    assertEquals(rawTableToLiveBrokersMapping.get(REALTIME_TABLE_NAME).size(), NUM_BROKER_INSTANCES);
+
+    // Test retrieving table names list to live broker mapping for each table without type suffix
+    Map<String, List<InstanceInfo>> tablesListToLiveBrokersMapping =
+        _helixResourceManager.getTableToLiveBrokersMapping(List.of(OFFLINE_TABLE_NAME, REALTIME_TABLE_NAME));
+    assertEquals(tablesListToLiveBrokersMapping.size(), 2);
+    assertEquals(tablesListToLiveBrokersMapping.get(OFFLINE_TABLE_NAME).size(), NUM_BROKER_INSTANCES);
+    assertEquals(tablesListToLiveBrokersMapping.get(REALTIME_TABLE_NAME).size(), NUM_BROKER_INSTANCES);
+
+    // Test retrieving table name to live broker mapping for table with type suffix
+    Map<String, List<InstanceInfo>> offlineTableToLiveBrokersMapping =
+        _helixResourceManager.getTableToLiveBrokersMapping(List.of(OFFLINE_TABLE_NAME));
+    assertEquals(offlineTableToLiveBrokersMapping.size(), 1);
+    assertEquals(offlineTableToLiveBrokersMapping.get(OFFLINE_TABLE_NAME).size(), NUM_BROKER_INSTANCES);
+
+    // Test that default value behaves the same as empty for optional argument
+    tableToLiveBrokersMapping = _helixResourceManager.getTableToLiveBrokersMapping();
+    assertEquals(tableToLiveBrokersMapping.size(), 2);
 
     // Delete the tables
     _helixResourceManager.deleteRealtimeTable(RAW_TABLE_NAME);

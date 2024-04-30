@@ -22,9 +22,9 @@ import com.google.common.base.Preconditions;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.calcite.rel.core.AggregateCall;
-import org.apache.calcite.rel.hint.PinotHintOptions;
-import org.apache.calcite.rel.hint.PinotHintStrategyTable;
 import org.apache.calcite.rel.hint.RelHint;
+import org.apache.pinot.calcite.rel.hint.PinotHintOptions;
+import org.apache.pinot.calcite.rel.hint.PinotHintStrategyTable;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.query.planner.logical.RexExpression;
 import org.apache.pinot.query.planner.logical.RexExpressionUtils;
@@ -50,7 +50,7 @@ public class AggregateNode extends AbstractPlanNode {
   public AggregateNode(int planFragmentId, DataSchema dataSchema, List<AggregateCall> aggCalls,
       List<RexExpression> groupSet, List<RelHint> relHints) {
     super(planFragmentId, dataSchema);
-    Preconditions.checkState(areHintsValid(relHints), "invalid sql hint for agg node: {}", relHints);
+    Preconditions.checkState(areHintsValid(relHints), "invalid sql hint for agg node: %s", relHints);
     _aggCalls = aggCalls.stream().map(RexExpressionUtils::fromAggregateCall).collect(Collectors.toList());
     _filterArgIndices = aggCalls.stream().map(c -> c.filterArg).collect(Collectors.toList());
     _groupSet = groupSet;

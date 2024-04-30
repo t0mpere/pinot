@@ -35,7 +35,10 @@ public class StreamIngestionConfig extends BaseJsonConfig {
   private final List<Map<String, String>> _streamConfigMaps;
 
   @JsonPropertyDescription("Whether to use column major mode when creating the segment.")
-  private boolean _columnMajorSegmentBuilderEnabled;
+  private boolean _columnMajorSegmentBuilderEnabled = true;
+
+  @JsonPropertyDescription("Whether to track offsets of the filtered stream messages during consumption.")
+  private boolean _trackFilteredMessageOffsets = false;
 
   @JsonCreator
   public StreamIngestionConfig(@JsonProperty("streamConfigMaps") List<Map<String, String>> streamConfigMaps) {
@@ -52,5 +55,13 @@ public class StreamIngestionConfig extends BaseJsonConfig {
 
   public boolean getColumnMajorSegmentBuilderEnabled() {
     return _columnMajorSegmentBuilderEnabled;
+  }
+
+  public void setTrackFilteredMessageOffsets(boolean trackFilteredMessageOffsets) {
+    _trackFilteredMessageOffsets = trackFilteredMessageOffsets;
+  }
+
+  public boolean isTrackFilteredMessageOffsets() {
+    return _trackFilteredMessageOffsets;
   }
 }

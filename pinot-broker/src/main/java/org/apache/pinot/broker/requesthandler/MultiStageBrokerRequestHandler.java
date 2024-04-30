@@ -19,8 +19,9 @@
 package org.apache.pinot.broker.requesthandler;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.collect.Maps;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,7 +31,6 @@ import javax.annotation.Nullable;
 import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
-import org.apache.calcite.jdbc.CalciteSchemaBuilder;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.broker.api.AccessControl;
 import org.apache.pinot.broker.api.RequesterIdentity;
@@ -38,6 +38,7 @@ import org.apache.pinot.broker.broker.AccessControlFactory;
 import org.apache.pinot.broker.querylog.QueryLogger;
 import org.apache.pinot.broker.queryquota.QueryQuotaManager;
 import org.apache.pinot.broker.routing.BrokerRoutingManager;
+import org.apache.pinot.calcite.jdbc.CalciteSchemaBuilder;
 import org.apache.pinot.common.config.provider.TableCache;
 import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.metrics.BrokerMeter;
@@ -51,6 +52,7 @@ import org.apache.pinot.common.response.broker.BrokerResponseStats;
 import org.apache.pinot.common.response.broker.QueryProcessingException;
 import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.DatabaseUtils;
 import org.apache.pinot.common.utils.ExceptionUtils;
 import org.apache.pinot.common.utils.config.QueryOptionsUtils;
 import org.apache.pinot.common.utils.request.RequestUtils;
@@ -61,6 +63,7 @@ import org.apache.pinot.core.transport.ServerInstance;
 import org.apache.pinot.query.QueryEnvironment;
 import org.apache.pinot.query.catalog.PinotCatalog;
 import org.apache.pinot.query.mailbox.MailboxService;
+import org.apache.pinot.query.planner.physical.DispatchablePlanFragment;
 import org.apache.pinot.query.planner.physical.DispatchableSubPlan;
 import org.apache.pinot.query.routing.WorkerManager;
 import org.apache.pinot.query.service.dispatch.QueryDispatcher;
@@ -68,6 +71,7 @@ import org.apache.pinot.query.type.TypeFactory;
 import org.apache.pinot.query.type.TypeSystem;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.eventlistener.query.BrokerQueryEventListener;
+import org.apache.pinot.spi.exception.DatabaseConflictException;
 import org.apache.pinot.spi.trace.RequestContext;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
@@ -79,7 +83,7 @@ import org.slf4j.LoggerFactory;
 public class MultiStageBrokerRequestHandler extends BaseBrokerRequestHandler {
   private static final Logger LOGGER = LoggerFactory.getLogger(MultiStageBrokerRequestHandler.class);
 
-  private final QueryEnvironment _queryEnvironment;
+  private final WorkerManager _workerManager;
   private final MailboxService _mailboxService;
   private final QueryDispatcher _queryDispatcher;
 
@@ -91,9 +95,7 @@ public class MultiStageBrokerRequestHandler extends BaseBrokerRequestHandler {
     LOGGER.info("Using Multi-stage BrokerRequestHandler.");
     String hostname = config.getProperty(CommonConstants.MultiStageQueryRunner.KEY_OF_QUERY_RUNNER_HOSTNAME);
     int port = Integer.parseInt(config.getProperty(CommonConstants.MultiStageQueryRunner.KEY_OF_QUERY_RUNNER_PORT));
-    _queryEnvironment = new QueryEnvironment(new TypeFactory(new TypeSystem()),
-        CalciteSchemaBuilder.asRootSchema(new PinotCatalog(tableCache)),
-        new WorkerManager(hostname, port, routingManager), _tableCache);
+    _workerManager = new WorkerManager(hostname, port, _routingManager);
     _mailboxService = new MailboxService(hostname, port, config);
     _queryDispatcher = new QueryDispatcher(_mailboxService);
 
@@ -124,11 +126,15 @@ public class MultiStageBrokerRequestHandler extends BaseBrokerRequestHandler {
     try {
       Long timeoutMsFromQueryOption = QueryOptionsUtils.getTimeoutMs(sqlNodeAndOptions.getOptions());
       queryTimeoutMs = timeoutMsFromQueryOption == null ? _brokerTimeoutMs : timeoutMsFromQueryOption;
+      String database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
       // Compile the request
       compilationStartTimeNs = System.nanoTime();
+      QueryEnvironment queryEnvironment = new QueryEnvironment(new TypeFactory(new TypeSystem()),
+          CalciteSchemaBuilder.asRootSchema(new PinotCatalog(database, _tableCache), database), _workerManager,
+          _tableCache);
       switch (sqlNodeAndOptions.getSqlNode().getKind()) {
         case EXPLAIN:
-          queryPlanResult = _queryEnvironment.explainQuery(query, sqlNodeAndOptions, requestId);
+          queryPlanResult = queryEnvironment.explainQuery(query, sqlNodeAndOptions, requestId);
           String plan = queryPlanResult.getExplainPlan();
           Set<String> tableNames = queryPlanResult.getTableNames();
           if (!hasTableAccess(requesterIdentity, tableNames, requestContext, httpHeaders)) {
@@ -138,9 +144,14 @@ public class MultiStageBrokerRequestHandler extends BaseBrokerRequestHandler {
           return constructMultistageExplainPlan(query, plan);
         case SELECT:
         default:
-          queryPlanResult = _queryEnvironment.planQuery(query, sqlNodeAndOptions, requestId);
+          queryPlanResult = queryEnvironment.planQuery(query, sqlNodeAndOptions, requestId);
           break;
       }
+    } catch (DatabaseConflictException e) {
+      LOGGER.info("{}. Request {}: {}", e.getMessage(), requestId, query);
+      _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
+      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+      return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
     } catch (WebApplicationException e) {
       throw e;
     } catch (RuntimeException e) {
@@ -159,6 +170,12 @@ public class MultiStageBrokerRequestHandler extends BaseBrokerRequestHandler {
 
     DispatchableSubPlan dispatchableSubPlan = queryPlanResult.getQueryPlan();
     Set<String> tableNames = queryPlanResult.getTableNames();
+
+    _brokerMetrics.addMeteredGlobalValue(BrokerMeter.MULTI_STAGE_QUERIES_GLOBAL, 1);
+    for (String tableName : tableNames) {
+      _brokerMetrics.addMeteredTableValue(tableName, BrokerMeter.MULTI_STAGE_QUERIES, 1);
+    }
+
     requestContext.setTableNames(List.copyOf(tableNames));
 
     // Compilation Time. This includes the time taken for parsing, compiling, create stage plans and assigning workers.
@@ -179,14 +196,20 @@ public class MultiStageBrokerRequestHandler extends BaseBrokerRequestHandler {
 
     Map<String, String> queryOptions = sqlNodeAndOptions.getOptions();
     boolean traceEnabled = Boolean.parseBoolean(queryOptions.get(CommonConstants.Broker.Request.TRACE));
-
-    ResultTable queryResults;
-    Map<Integer, ExecutionStatsAggregator> stageIdStatsMap = new HashMap<>();
-    for (int stageId = 0; stageId < dispatchableSubPlan.getQueryStageList().size(); stageId++) {
-      stageIdStatsMap.put(stageId, new ExecutionStatsAggregator(traceEnabled));
+    Map<Integer, ExecutionStatsAggregator> stageIdStatsMap;
+    if (!traceEnabled) {
+      stageIdStatsMap = Collections.singletonMap(0, new ExecutionStatsAggregator(false));
+    } else {
+      List<DispatchablePlanFragment> stagePlans = dispatchableSubPlan.getQueryStageList();
+      int numStages = stagePlans.size();
+      stageIdStatsMap = Maps.newHashMapWithExpectedSize(numStages);
+      for (int stageId = 0; stageId < numStages; stageId++) {
+        stageIdStatsMap.put(stageId, new ExecutionStatsAggregator(true));
+      }
     }
 
     long executionStartTimeNs = System.nanoTime();
+    ResultTable queryResults;
     try {
       queryResults = _queryDispatcher.submitAndReduce(requestContext, dispatchableSubPlan, queryTimeoutMs, queryOptions,
           stageIdStatsMap);

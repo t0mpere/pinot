@@ -23,6 +23,7 @@ import { InstanceType, TableData } from 'Models';
 import CustomizedTables from './Table';
 import PinotMethodUtils from '../utils/PinotMethodUtils';
 import Utils from '../utils/Utils';
+import Loading from './Loading';
 
 type BaseProps = {
   instanceType: InstanceType;
@@ -88,7 +89,7 @@ export const AsyncInstanceTable = ({
 
   useEffect(() => {
     const instances = fetchInstances(instanceType, tenant);
-    if (showInstanceDetails) {
+    if (showInstanceDetails && cluster.length > 0) {
       const instanceDetails = instances.then(async (instancesData) => {
         const liveInstanceArr = await PinotMethodUtils.getLiveInstance(cluster);
         return PinotMethodUtils.getInstanceData(
@@ -98,6 +99,14 @@ export const AsyncInstanceTable = ({
       });
       instanceDetails.then((instanceDetailsData) => {
         setInstanceData(instanceDetailsData);
+      });
+    } else if (showInstanceDetails && cluster.length == 0) {
+      instances.then((instancesData) => {
+        const defaultLoadingArray = Array(4).fill(Loading);
+        setInstanceData({
+          columns: instanceColumns,
+          records:  [[instancesData[0], ...defaultLoadingArray ]],
+        });
       });
     } else {
       instances.then((instancesData) => {

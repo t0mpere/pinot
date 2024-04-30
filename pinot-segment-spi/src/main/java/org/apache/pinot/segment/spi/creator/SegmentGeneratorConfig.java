@@ -120,6 +120,7 @@ public class SegmentGeneratorConfig implements Serializable {
   private boolean _optimizeDictionary = false;
   private boolean _optimizeDictionaryForMetrics = false;
   private double _noDictionarySizeRatioThreshold = IndexingConfig.DEFAULT_NO_DICTIONARY_SIZE_RATIO_THRESHOLD;
+  private boolean _realtimeConversion = false;
   private final Map<String, FieldIndexConfigs> _indexConfigsByColName;
 
   // constructed from FieldConfig
@@ -274,7 +275,8 @@ public class SegmentGeneratorConfig implements Serializable {
     if (fieldConfigList != null) {
       for (FieldConfig fieldConfig : fieldConfigList) {
         if (fieldConfig.getEncodingType() == FieldConfig.EncodingType.RAW
-            && fieldConfig.getCompressionCodec() != null) {
+            && fieldConfig.getCompressionCodec() != null
+            && fieldConfig.getCompressionCodec().isApplicableToRawIndex()) {
           _rawIndexCreationColumns.add(fieldConfig.getName());
           _rawIndexCompressionType.put(fieldConfig.getName(),
               ChunkCompressionType.valueOf(fieldConfig.getCompressionCodec().name()));
@@ -373,7 +375,7 @@ public class SegmentGeneratorConfig implements Serializable {
   public void setInputFilePath(String inputFilePath) {
     Preconditions.checkNotNull(inputFilePath);
     File inputFile = new File(inputFilePath);
-    Preconditions.checkState(inputFile.exists(), "Input path {} does not exist.", inputFilePath);
+    Preconditions.checkState(inputFile.exists(), "Input path %s does not exist.", inputFilePath);
     _inputFilePath = inputFile.getAbsolutePath();
   }
 
@@ -720,6 +722,14 @@ public class SegmentGeneratorConfig implements Serializable {
 
   public double getNoDictionarySizeRatioThreshold() {
     return _noDictionarySizeRatioThreshold;
+  }
+
+  public boolean isRealtimeConversion() {
+    return _realtimeConversion;
+  }
+
+  public void setRealtimeConversion(boolean realtimeConversion) {
+    _realtimeConversion = realtimeConversion;
   }
 
   public void setNoDictionarySizeRatioThreshold(double noDictionarySizeRatioThreshold) {

@@ -47,7 +47,7 @@ import org.apache.pinot.core.plan.ProjectPlanNode;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.startree.StarTreeUtils;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
-import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.segment.spi.index.startree.AggregationFunctionColumnPair;
 
 
@@ -60,22 +60,23 @@ public class AggregationFunctionUtils {
   }
 
   /**
-   * (For Star-Tree) Creates an {@link AggregationFunctionColumnPair} from the {@link AggregationFunction}. Returns
-   * {@code null} if the {@link AggregationFunction} cannot be represented as an {@link AggregationFunctionColumnPair}
-   * (e.g. has multiple arguments, argument is not column etc.).
+   * (For Star-Tree) Creates an {@link AggregationFunctionColumnPair} in stored type from the
+   * {@link AggregationFunction}. Returns {@code null} if the {@link AggregationFunction} cannot be represented as an
+   * {@link AggregationFunctionColumnPair} (e.g. has multiple arguments, argument is not column etc.).
+   * TODO: Allow multiple arguments for aggregation functions, e.g. percentileEst
    */
   @Nullable
-  public static AggregationFunctionColumnPair getAggregationFunctionColumnPair(
-      AggregationFunction aggregationFunction) {
-    AggregationFunctionType aggregationFunctionType = aggregationFunction.getType();
-    if (aggregationFunctionType == AggregationFunctionType.COUNT) {
+  public static AggregationFunctionColumnPair getStoredFunctionColumnPair(AggregationFunction aggregationFunction) {
+    AggregationFunctionType functionType = aggregationFunction.getType();
+    if (functionType == AggregationFunctionType.COUNT) {
       return AggregationFunctionColumnPair.COUNT_STAR;
     }
     List<ExpressionContext> inputExpressions = aggregationFunction.getInputExpressions();
     if (inputExpressions.size() == 1) {
       ExpressionContext inputExpression = inputExpressions.get(0);
       if (inputExpression.getType() == ExpressionContext.Type.IDENTIFIER) {
-        return new AggregationFunctionColumnPair(aggregationFunctionType, inputExpression.getIdentifier());
+        return new AggregationFunctionColumnPair(AggregationFunctionColumnPair.getStoredType(functionType),
+            inputExpression.getIdentifier());
       }
     }
     return null;
@@ -242,16 +243,15 @@ public class AggregationFunctionUtils {
   /**
    * Builds {@link AggregationInfo} for aggregations.
    */
-  public static AggregationInfo buildAggregationInfo(IndexSegment indexSegment, QueryContext queryContext,
+  public static AggregationInfo buildAggregationInfo(SegmentContext segmentContext, QueryContext queryContext,
       AggregationFunction[] aggregationFunctions, @Nullable FilterContext filter, BaseFilterOperator filterOperator,
       List<Pair<Predicate, PredicateEvaluator>> predicateEvaluators) {
     BaseProjectOperator<?> projectOperator = null;
 
     // TODO: Create a short-circuit ProjectOperator when filter result is empty
     if (!filterOperator.isResultEmpty()) {
-      projectOperator =
-          StarTreeUtils.createStarTreeBasedProjectOperator(indexSegment, queryContext, aggregationFunctions, filter,
-              predicateEvaluators);
+      projectOperator = StarTreeUtils.createStarTreeBasedProjectOperator(segmentContext.getIndexSegment(), queryContext,
+          aggregationFunctions, filter, predicateEvaluators);
     }
 
     if (projectOperator != null) {
@@ -261,7 +261,7 @@ public class AggregationFunctionUtils {
           AggregationFunctionUtils.collectExpressionsToTransform(aggregationFunctions,
               queryContext.getGroupByExpressions());
       projectOperator =
-          new ProjectPlanNode(indexSegment, queryContext, expressionsToTransform, DocIdSetPlanNode.MAX_DOC_PER_CALL,
+          new ProjectPlanNode(segmentContext, queryContext, expressionsToTransform, DocIdSetPlanNode.MAX_DOC_PER_CALL,
               filterOperator).run();
       return new AggregationInfo(aggregationFunctions, projectOperator, false);
     }
@@ -270,11 +270,11 @@ public class AggregationFunctionUtils {
   /**
    * Builds swim-lanes (list of {@link AggregationInfo}) for filtered aggregations.
    */
-  public static List<AggregationInfo> buildFilteredAggregationInfos(IndexSegment indexSegment,
+  public static List<AggregationInfo> buildFilteredAggregationInfos(SegmentContext segmentContext,
       QueryContext queryContext) {
     assert queryContext.getAggregationFunctions() != null && queryContext.getFilteredAggregationFunctions() != null;
 
-    FilterPlanNode mainFilterPlan = new FilterPlanNode(indexSegment, queryContext);
+    FilterPlanNode mainFilterPlan = new FilterPlanNode(segmentContext, queryContext);
     BaseFilterOperator mainFilterOperator = mainFilterPlan.run();
     List<Pair<Predicate, PredicateEvaluator>> mainPredicateEvaluators = mainFilterPlan.getPredicateEvaluators();
 
@@ -284,7 +284,7 @@ public class AggregationFunctionUtils {
       Set<ExpressionContext> expressions =
           collectExpressionsToTransform(aggregationFunctions, queryContext.getGroupByExpressions());
       BaseProjectOperator<?> projectOperator =
-          new ProjectPlanNode(indexSegment, queryContext, expressions, DocIdSetPlanNode.MAX_DOC_PER_CALL,
+          new ProjectPlanNode(segmentContext, queryContext, expressions, DocIdSetPlanNode.MAX_DOC_PER_CALL,
               mainFilterOperator).run();
       return Collections.singletonList(new AggregationInfo(aggregationFunctions, projectOperator, false));
     }
@@ -306,7 +306,7 @@ public class AggregationFunctionUtils {
             combinedFilter = FilterContext.forAnd(List.of(mainFilter, filter));
           }
 
-          FilterPlanNode subFilterPlan = new FilterPlanNode(indexSegment, queryContext, filter);
+          FilterPlanNode subFilterPlan = new FilterPlanNode(segmentContext, queryContext, filter);
           BaseFilterOperator subFilterOperator = subFilterPlan.run();
           BaseFilterOperator combinedFilterOperator;
           if (mainFilterOperator.isResultMatchingAll() || subFilterOperator.isResultEmpty()) {
@@ -341,7 +341,7 @@ public class AggregationFunctionUtils {
         AggregationFunction[] aggregationFunctions =
             filteredAggregationContext._aggregationFunctions.toArray(new AggregationFunction[0]);
         aggregationInfos.add(
-            buildAggregationInfo(indexSegment, queryContext, aggregationFunctions, filteredAggregationContext._filter,
+            buildAggregationInfo(segmentContext, queryContext, aggregationFunctions, filteredAggregationContext._filter,
                 filteredAggregationContext._filterOperator, filteredAggregationContext._predicateEvaluators));
       }
     }
@@ -349,7 +349,7 @@ public class AggregationFunctionUtils {
     if (!nonFilteredFunctions.isEmpty()) {
       AggregationFunction[] aggregationFunctions = nonFilteredFunctions.toArray(new AggregationFunction[0]);
       aggregationInfos.add(
-          buildAggregationInfo(indexSegment, queryContext, aggregationFunctions, mainFilter, mainFilterOperator,
+          buildAggregationInfo(segmentContext, queryContext, aggregationFunctions, mainFilter, mainFilterOperator,
               mainPredicateEvaluators));
     }
 

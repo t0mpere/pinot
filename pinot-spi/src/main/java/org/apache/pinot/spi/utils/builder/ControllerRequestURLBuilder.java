@@ -384,7 +384,7 @@ public class ControllerRequestURLBuilder {
   }
 
   public String forListAllCrcInformationForTable(String tableName) {
-    return StringUtil.join("/", _baseUrl, "tables", tableName, "segments", "crc");
+    return StringUtil.join("/", _baseUrl, "segments", tableName, "crc");
   }
 
   public String forDeleteTableWithType(String tableName, String tableType) {
@@ -433,6 +433,16 @@ public class ControllerRequestURLBuilder {
     url.append(StringUtil.join("/", _baseUrl, "segments", tableName,
         String.format("choose?startTimestamp=%d&endTimestamp=%d", startTimeInMilliSeconds, endTimeInMilliSeconds)));
     return url.toString();
+  }
+
+  public String forDeleteMultipleSegments(String tableName, String tableType, List<String> segments) {
+    StringBuilder fullUrl = new StringBuilder(
+        StringUtil.join("?", StringUtil.join("/", _baseUrl, "segments", tableName),
+             "type=" + tableType));
+    for (String segment : segments) {
+      fullUrl.append("&segments=").append(segment);
+    }
+    return fullUrl.toString();
   }
 
   private void appendUrlParameter(StringBuilder url, String urlParameterKey, String urlParameterValue) {
@@ -523,6 +533,14 @@ public class ControllerRequestURLBuilder {
 
   public String forZkPutChildren(String path) {
     return StringUtil.join("/", _baseUrl, "zk/putChildren", "?path=" + path);
+  }
+
+  public String forZKCreate() {
+    return StringUtil.join("/", _baseUrl, "zk/create");
+  }
+
+  public String forZkDelete() {
+    return StringUtil.join("/", _baseUrl, "zk/delete");
   }
 
   public String forZkGet(String path) {

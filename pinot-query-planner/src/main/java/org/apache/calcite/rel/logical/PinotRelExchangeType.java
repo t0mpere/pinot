@@ -18,7 +18,11 @@
  */
 package org.apache.calcite.rel.logical;
 
-/** Type of exchange. */
+/**
+ * Type of exchange.
+ * TODO: Move this class to org.apache.calcite.rel.logical package after releasing 1.2.0. With release 1.1.0,
+ *       ProtoSerializationUtils cannot handle class movement.
+ */
 public enum PinotRelExchangeType {
 
   /**

@@ -48,6 +48,7 @@ public class StreamConfig {
 
   public static final long DEFAULT_STREAM_CONNECTION_TIMEOUT_MILLIS = 30_000;
   public static final int DEFAULT_STREAM_FETCH_TIMEOUT_MILLIS = 5_000;
+  public static final int DEFAULT_STREAM_FETCH_TIMEOUT_MILLIS_KINESIS = 600_000;
   public static final int DEFAULT_IDLE_TIMEOUT_MILLIS = 3 * 60 * 1000;
 
   private static final double CONSUMPTION_RATE_LIMIT_NOT_SPECIFIED = -1;
@@ -65,6 +66,7 @@ public class StreamConfig {
   private final long _idleTimeoutMillis;
 
   private final int _flushThresholdRows;
+  private final int _flushThresholdSegmentRows;
   private final long _flushThresholdTimeMillis;
   private final long _flushThresholdSegmentSizeBytes;
   private final int _flushAutotuneInitialRows; // initial num rows to use for SegmentSizeBasedFlushThresholdUpdater
@@ -142,7 +144,11 @@ public class StreamConfig {
     }
     _connectionTimeoutMillis = connectionTimeoutMillis;
 
-    int fetchTimeoutMillis = DEFAULT_STREAM_FETCH_TIMEOUT_MILLIS;
+    // For Kinesis, we need to set a higher fetch timeout to avoid getting stuck in empty records loop
+    // TODO: Remove this once we have a better way to handle empty records in Kinesis
+    int fetchTimeoutMillis =
+        _consumerFactoryClassName.contains("KinesisConsumerFactory") ? DEFAULT_STREAM_FETCH_TIMEOUT_MILLIS_KINESIS
+            : DEFAULT_STREAM_FETCH_TIMEOUT_MILLIS;
     String fetchTimeoutKey =
         StreamConfigProperties.constructStreamProperty(_type, StreamConfigProperties.STREAM_FETCH_TIMEOUT_MILLIS);
     String fetchTimeoutValue = streamConfigMap.get(fetchTimeoutKey);
@@ -171,6 +177,7 @@ public class StreamConfig {
     _idleTimeoutMillis = idleTimeoutMillis;
 
     _flushThresholdRows = extractFlushThresholdRows(streamConfigMap);
+    _flushThresholdSegmentRows = extractFlushThresholdSegmentRows(streamConfigMap);
     _flushThresholdTimeMillis = extractFlushThresholdTimeMillis(streamConfigMap);
     _flushThresholdSegmentSizeBytes = extractFlushThresholdSegmentSize(streamConfigMap);
     _serverUploadToDeepStore = Boolean.parseBoolean(
@@ -217,7 +224,6 @@ public class StreamConfig {
   }
 
   private long extractFlushThresholdSegmentSize(Map<String, String> streamConfigMap) {
-    long segmentSizeBytes = -1;
     String key = StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_SEGMENT_SIZE;
     String flushThresholdSegmentSizeStr = streamConfigMap.get(key);
     if (flushThresholdSegmentSizeStr == null) {
@@ -225,19 +231,14 @@ public class StreamConfig {
       key = StreamConfigProperties.DEPRECATED_SEGMENT_FLUSH_DESIRED_SIZE;
       flushThresholdSegmentSizeStr = streamConfigMap.get(key);
     }
-
     if (flushThresholdSegmentSizeStr != null) {
       try {
-        segmentSizeBytes = DataSizeUtils.toBytes(flushThresholdSegmentSizeStr);
+        return DataSizeUtils.toBytes(flushThresholdSegmentSizeStr);
       } catch (Exception e) {
-        LOGGER.warn("Invalid config {}: {}, defaulting to: {}", key, flushThresholdSegmentSizeStr,
-            DataSizeUtils.fromBytes(DEFAULT_FLUSH_THRESHOLD_SEGMENT_SIZE_BYTES));
+        throw new IllegalArgumentException("Invalid config " + key + ": " + flushThresholdSegmentSizeStr);
       }
-    }
-    if (segmentSizeBytes > 0) {
-      return segmentSizeBytes;
     } else {
-      return DEFAULT_FLUSH_THRESHOLD_SEGMENT_SIZE_BYTES;
+      return -1;
     }
   }
 
@@ -256,17 +257,26 @@ public class StreamConfig {
     }
     if (flushThresholdRowsStr != null) {
       try {
-        int flushThresholdRows = Integer.parseInt(flushThresholdRowsStr);
-        // Flush threshold rows 0 means using segment size based flush threshold
-        Preconditions.checkState(flushThresholdRows >= 0);
-        return flushThresholdRows;
+        return Integer.parseInt(flushThresholdRowsStr);
       } catch (Exception e) {
-        LOGGER.warn("Invalid config {}: {}, defaulting to: {}", key, flushThresholdRowsStr,
-            DEFAULT_FLUSH_THRESHOLD_ROWS);
-        return DEFAULT_FLUSH_THRESHOLD_ROWS;
+        throw new IllegalArgumentException("Invalid config " + key + ": " + flushThresholdRowsStr);
       }
     } else {
-      return DEFAULT_FLUSH_THRESHOLD_ROWS;
+      return -1;
+    }
+  }
+
+  protected int extractFlushThresholdSegmentRows(Map<String, String> streamConfigMap) {
+    String key = StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_SEGMENT_ROWS;
+    String flushThresholdSegmentRowsStr = streamConfigMap.get(key);
+    if (flushThresholdSegmentRowsStr != null) {
+      try {
+        return Integer.parseInt(flushThresholdSegmentRowsStr);
+      } catch (Exception e) {
+        throw new IllegalArgumentException("Invalid config " + key + ": " + flushThresholdSegmentRowsStr);
+      }
+    } else {
+      return -1;
     }
   }
 
@@ -286,9 +296,7 @@ public class StreamConfig {
           // For backward-compatibility, parse it as milliseconds value
           return Long.parseLong(flushThresholdTimeStr);
         } catch (NumberFormatException nfe) {
-          LOGGER.warn("Invalid config {}: {}, defaulting to: {}", key, flushThresholdTimeStr,
-              DEFAULT_FLUSH_THRESHOLD_TIME_MILLIS);
-          return DEFAULT_FLUSH_THRESHOLD_TIME_MILLIS;
+          throw new IllegalArgumentException("Invalid config " + key + ": " + flushThresholdTimeStr);
         }
       }
     } else {
@@ -350,6 +358,10 @@ public class StreamConfig {
     return _flushThresholdRows;
   }
 
+  public int getFlushThresholdSegmentRows() {
+    return _flushThresholdSegmentRows;
+  }
+
   public long getFlushThresholdTimeMillis() {
     return _flushThresholdTimeMillis;
   }
@@ -386,11 +398,11 @@ public class StreamConfig {
         + ", _decoderClass='" + _decoderClass + '\'' + ", _decoderProperties=" + _decoderProperties
         + ", _connectionTimeoutMillis=" + _connectionTimeoutMillis + ", _fetchTimeoutMillis=" + _fetchTimeoutMillis
         + ", _idleTimeoutMillis=" + _idleTimeoutMillis + ", _flushThresholdRows=" + _flushThresholdRows
-        + ", _flushThresholdTimeMillis=" + _flushThresholdTimeMillis + ", _flushThresholdSegmentSizeBytes="
-        + _flushThresholdSegmentSizeBytes + ", _flushAutotuneInitialRows=" + _flushAutotuneInitialRows + ", _groupId='"
-        + _groupId + '\'' + ", _topicConsumptionRateLimit=" + _topicConsumptionRateLimit + ", _streamConfigMap="
-        + _streamConfigMap + ", _offsetCriteria=" + _offsetCriteria + ", _serverUploadToDeepStore="
-        + _serverUploadToDeepStore + '}';
+        + ", _flushThresholdSegmentRows=" + _flushThresholdSegmentRows + ", _flushThresholdTimeMillis="
+        + _flushThresholdTimeMillis + ", _flushThresholdSegmentSizeBytes=" + _flushThresholdSegmentSizeBytes
+        + ", _flushAutotuneInitialRows=" + _flushAutotuneInitialRows + ", _groupId='" + _groupId + '\''
+        + ", _topicConsumptionRateLimit=" + _topicConsumptionRateLimit + ", _streamConfigMap=" + _streamConfigMap
+        + ", _offsetCriteria=" + _offsetCriteria + ", _serverUploadToDeepStore=" + _serverUploadToDeepStore + '}';
   }
 
   @Override
@@ -404,6 +416,7 @@ public class StreamConfig {
     StreamConfig that = (StreamConfig) o;
     return _connectionTimeoutMillis == that._connectionTimeoutMillis && _fetchTimeoutMillis == that._fetchTimeoutMillis
         && _idleTimeoutMillis == that._idleTimeoutMillis && _flushThresholdRows == that._flushThresholdRows
+        && _flushThresholdSegmentRows == that._flushThresholdSegmentRows
         && _flushThresholdTimeMillis == that._flushThresholdTimeMillis
         && _flushThresholdSegmentSizeBytes == that._flushThresholdSegmentSizeBytes
         && _flushAutotuneInitialRows == that._flushAutotuneInitialRows
@@ -420,7 +433,8 @@ public class StreamConfig {
   public int hashCode() {
     return Objects.hash(_type, _topicName, _tableNameWithType, _consumerFactoryClassName, _decoderClass,
         _decoderProperties, _connectionTimeoutMillis, _fetchTimeoutMillis, _idleTimeoutMillis, _flushThresholdRows,
-        _flushThresholdTimeMillis, _flushThresholdSegmentSizeBytes, _flushAutotuneInitialRows, _groupId,
-        _topicConsumptionRateLimit, _streamConfigMap, _offsetCriteria, _serverUploadToDeepStore);
+        _flushThresholdSegmentRows, _flushThresholdTimeMillis, _flushThresholdSegmentSizeBytes,
+        _flushAutotuneInitialRows, _groupId, _topicConsumptionRateLimit, _streamConfigMap, _offsetCriteria,
+        _serverUploadToDeepStore);
   }
 }
